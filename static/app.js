@@ -29,7 +29,7 @@ const I = {
 
 async function api(path, body, method) {
   const opts = (body !== undefined || method)
-    ? { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) }
+    ? { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}), keepalive: path.startsWith('/progress/') }
     : undefined;
   const r = await fetch('/api' + path, opts);
   const j = await r.json().catch(() => ({}));
@@ -79,10 +79,10 @@ const followBtn = (channel, on) => `<button class="pill ${on ? '' : 'solid'}" da
 function badges(v) {
   let h = '';
   if (v.reason) {
-    const to = v.reason.playlist ? `#/playlist/${v.reason.playlist}` : v.reason.vid ? `#/v/${v.reason.vid}` : '';
+    const to = v.reason.playlist ? `#/playlist/${v.reason.playlist}` : v.reason.vid ? `#/v/${v.reason.vid}` : v.reason.area ? `#/a/${v.reason.area}` : '';
     h += `<span class="via ${esc(v.reason.kind)}">${to ? `<a href="${to}">${esc(v.reason.text)}</a>` : esc(v.reason.text)}</span>`;
   }
-  if (v.new) h += '<span class="via new">New</span>';
+  if (v.new && !B.settings.calm) h += '<span class="via new">New</span>';
   return h;
 }
 const chanLink = v => `<a href="#/channel/${enc(v.channel)}">${esc(v.channel)}</a>`;
@@ -104,13 +104,15 @@ function ago(iso) {             // "8 years ago", as YouTube writes it
     if (n >= 1) return `${n} ${unit}${n > 1 ? 's' : ''} ago`;
   }
 }
-// "1.2M views · 8 years ago", then the HN line for videos that come from the HN data
+// "1.2M views · 8 years ago"; the calm setting leaves the view count out
 function factLine(v) {
-  return [fmtViews(v.views), v.pub ? `<span title="${esc(v.pub)}">${ago(v.pub)}</span>` : ''].filter(Boolean).join(' &middot; ');
+  return [B.settings.calm ? '' : fmtViews(v.views), v.pub ? `<span title="${esc(v.pub)}">${ago(v.pub)}</span>` : ''].filter(Boolean).join(' &middot; ');
 }
-const hnLine = v => v.hn ? `${esc(v.type)} &middot; ${v.recs} HN rec${v.recs === 1 ? '' : 's'}` : '';
+const fmtMin = s => { const m = Math.round(s / 60); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
+// "Today: 2 videos, 47 min" from the server's tally of actual playback; empty until a minute has been played
+const tallyText = t => t && t.secs >= 60 ? `Today: ${t.videos} video${t.videos === 1 ? '' : 's'}, ${fmtMin(t.secs)}` : '';
 function thumbBox(v, q) {
-  return `<div class="thumb"><a href="#/v/${v.vid}" tabindex="-1" aria-hidden="true">${timg(v, q)}${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}</a>
+  return `<div class="thumb"><a href="#/v/${v.vid}" tabindex="-1" aria-hidden="true">${timg(v, q)}${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}${v.frac ? `<span class="tprog"><i style="width:${Math.round(v.frac * 100)}%"></i></span>` : ''}</a>
     <button class="tbtn" data-act="seen" title="${seenTitle(v.watched)}" aria-label="${seenTitle(v.watched)}">${I.check}</button></div>`;
 }
 const kebab = '<button class="ibtn kebab" data-act="menu" aria-label="More actions" title="More actions">' + I.more + '</button>';
@@ -171,7 +173,7 @@ const SIDE_FOLLOWS = 8;             // sidebar shows this many followed channels
 function renderSide() {
   $('#sidemore').innerHTML = `
     <h4>Following</h4>
-    ${[...B.follows].sort((x, y) => y.new - x.new).slice(0, SIDE_FOLLOWS).map(f => `<a class="item" href="#/channel/${enc(f.name)}"><span class="name">${esc(f.name)}</span>${f.new ? `<span class="dot" title="${f.new} new"></span><span class="n">${f.new}</span>` : ''}</a>`).join('') || '<a class="item muted" href="#/following"><span class="name">Follow a channel</span></a>'}
+    ${[...B.follows].sort((x, y) => y.new - x.new).slice(0, SIDE_FOLLOWS).map(f => `<a class="item" href="#/channel/${enc(f.name)}"><span class="name">${esc(f.name)}</span>${f.new && !B.settings.calm ? `<span class="dot" title="${f.new} new"></span><span class="n">${f.new}</span>` : ''}</a>`).join('') || '<a class="item muted" href="#/following"><span class="name">Follow a channel</span></a>'}
     ${B.follows.length > SIDE_FOLLOWS ? `<a class="item muted" href="#/following/channels"><span class="name">Show all ${B.follows.length}</span></a>` : ''}
     <h4>Playlists</h4>
     ${B.playlists.map(p => `<a class="item" href="#/playlist/${p.id}"><span class="name">${esc(p.name)}</span><span class="n">${p.done}/${p.total}</span></a>`).join('') || '<a class="item muted" href="#/playlists"><span class="name">Make a playlist</span></a>'}`;
@@ -185,31 +187,22 @@ async function reboot() { B = await api('/boot'); renderSide(); renderCounter();
 
 const main = html => { $('#main').innerHTML = html; };
 
+// Home: what you already chose first (started videos, your queue), then a few suggestions, then a few from
+// outside your usual topics. A short page with an end, not a feed.
 async function pageMix(p) {
   const f = filterParams(p, ['len', 'type', 'area']);
   const d = await api('/mix?' + qs(f));
   const nice = new Date(d.date + 'T12:00').toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-  let h = `<div class="pagehead"><h2>Today's Mix <small>${esc(nice)}</small></h2></div>`
-    + filterBar('#/', {}, f, `<span class="muted">from ${d.pool.toLocaleString()} unwatched videos</span>
-      <button class="chip" data-act="reshuffle" title="Deal a new mix for today">${I.refresh} Reshuffle</button>`);
-  if (!d.lead) { main(h + '<p class="empty">Nothing matches these filters. Try removing one.</p>'); return; }
-  const v = d.lead; CARDS[v.vid] = v;
-  const facts = factLine(v);
-  h += `<div class="lead card ${v.watched ? 'seen' : ''}" data-vid="${v.vid}">
-      ${thumbBox(v, 'hqdefault')}
-      <div class="body"><div class="text">
-        <div class="eyebrow">Today's feature</div>
-        ${vt(v)}
-        <div class="sub">${[chanLink(v), facts, hnLine(v)].filter(Boolean).join(' &middot; ')}</div>
-        ${v.why ? `<p class="why">${esc(v.why)}</p>` : ''}
-        ${badges(v)}
-        <div class="actions">
-          <button class="pill solid" data-act="watch">${I.play} Watch</button>
-          <button class="pill ${v.watched ? 'on' : ''}" data-act="seen" title="${seenTitle(v.watched)}">${I.check}<span class="lbl">${seenLabel(v.watched)}</span></button>
-          <button class="pill" data-act="list">${I.save} Save</button>
-        </div>
-      </div>${kebab}</div></div>`;
-  main(h + grid(d.items));
+  const sec = (title, sub, items) => items.length ? `<section class="hsec"><h3 class="sechead">${title}</h3><p class="sub">${sub}</p>${grid(items)}</section>` : '';
+  const body = sec('Continue watching', 'Started and not finished.', d.continue)
+    + sec('Your queue', 'Next in your playlists, and uploads from channels you follow.', d.queue)
+    + sec('Picked for you', 'A few suggestions close to what you liked and watched.', d.picks)
+    + sec('Branch out', 'Well-regarded videos from topics you rarely watch.', d.branch);
+  main(`<div class="pagehead"><h2>Today <small>${esc(nice)}</small></h2></div>`
+    + filterBar('#/', {}, f, `<span class="muted">${esc(tallyText(d.today))}</span>`)
+    + (body ? body + `<div class="endnote"><p>That is everything for today.</p>
+        <button class="chip" data-act="reshuffle" title="Deal different suggestions for today">${I.refresh} Different suggestions</button></div>`
+      : '<p class="empty">Nothing matches these filters. Try removing one.</p>'));
 }
 
 // One listing page for four addresses: #/browse (everything, or search results), #/channel/<name>,
@@ -241,7 +234,7 @@ async function pageBrowse(p, o = {}) {
   const pager = d.pages > 1 ? `<div class="pager">${page > 1 ? `<a class="pill" href="${to(page - 1)}">Previous</a>` : ''}
       <span>Page ${d.page} of ${d.pages}</span>${page < d.pages ? `<a class="pill" href="${to(page + 1)}">Next</a>` : ''}</div>` : '';
   h += filterBar(base, { q }, f, `<span class="muted">${d.total.toLocaleString()} video${d.total === 1 ? '' : 's'}</span>`)
-    + (f.sort === 'gems' ? '<p class="note">Hidden gems: recommended by at least two people on Hacker News, yet under 250,000 views on YouTube.</p>' : '')
+    + (f.sort === 'gems' ? '<p class="note">Hidden gems: recommended by several people, yet little watched on YouTube.</p>' : '')
     + grid(d.items) + pager;
   const yts = q && page === 1;   // general YouTube results under the first page of a search
   if (yts) h += `<section id="ytres" class="ytres"><h3>From YouTube</h3>${B.has_key
@@ -250,7 +243,7 @@ async function pageBrowse(p, o = {}) {
   main(h);
   if (yts && B.has_key) ytResults(q, f.len);
 }
-// Fills the "From YouTube" section after the HN results are on screen; does nothing if the page changed meanwhile.
+// Fills the "From YouTube" section after the library results are on screen; does nothing if the page changed meanwhile.
 async function ytResults(q, len) {
   const at = location.hash;
   let h;
@@ -291,32 +284,53 @@ async function pageVideo(vid, autoplay) {
   if (v.hn) {
     h += `<div class="desc">
         <div class="top-line">${factLine(v)}</div>
-        <div class="top-line muted">${esc(v.type)} &middot; ${esc(v.level)} &middot; score ${v.score} &middot;
-          ${v.stats.recommenders} recommenders, ${v.stats.strong_recs} strong &middot; HN ${v.stats.first_year}&ndash;${v.stats.last_year}</div>
+        <div class="top-line muted">${esc(v.type)} &middot; ${esc(v.level)}</div>
         <p>${esc(v.summary)}</p>
-        <p class="why"><b>Why HN keeps linking it:</b> ${esc(v.why)}</p>
         <div class="tags">${v.categories.map(c => `<a class="tag" href="#/c/${c.id}">${esc(c.name)}</a>`).join('')}
           ${v.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div>
       </div>
-      <div class="comments"><h2>${v.mentions.length} Hacker News comment${v.mentions.length === 1 ? '' : 's'}</h2>
+      <details class="comments"><summary>What people said about it <span class="muted">${v.mentions.length}</span></summary>
+      <p class="why">${esc(v.why)}</p>
       ${v.mentions.map(m => `<div class="cmt"><div class="avatar">${initial(m.author)}</div><div>
         <div class="meta"><b>${esc(m.author)}</b>${esc(m.month)}</div>
         <div class="body">${esc(m.text)}</div>
-        <div class="foot"><span class="stance ${esc(m.stance)}">${esc(m.stance.replace('_', ' '))}</span>
-          <a href="${esc(m.url)}" target="_blank" rel="noopener">in &ldquo;${esc(m.story)}&rdquo; &nearr;</a></div></div></div>`).join('')}</div>`;
+        <div class="foot"><a href="${esc(m.url)}" target="_blank" rel="noopener">in &ldquo;${esc(m.story)}&rdquo; &nearr;</a></div></div></div>`).join('')}</details>`;
   } else {
     h += `<div class="desc">${factLine(v) ? `<div class="top-line">${factLine(v)}</div>` : ''}
-      <p class="why" style="margin:0">This one comes from ${v.upload ? 'a channel you follow' : v.in_playlists.length ? 'a playlist' : 'a YouTube search'}, not from the HN data, so there are no HN comments for it.</p></div>`;
+      <p class="why" style="margin:0">This one comes from ${v.upload ? 'a channel you follow' : v.in_playlists.length ? 'one of your playlists' : 'a YouTube search'}.</p></div>`;
   }
   h += '</div>';
-  if (v.hn && v.related.length) h += `<div class="secondary"><h3>Recommended by the same people</h3>${v.related.map(compact).join('')}</div>`;
+  if (v.hn && v.related.length) h += `<div class="secondary"><h3>Related</h3>${v.related.map(compact).join('')}</div>`;
   main(h + '</div>');
   if (autoplay) startPlayer(v.vid);
 }
 
-// ---- embedded player: marks a video watched at 90% (or the end) and remembers where you stopped
+// ---- embedded player. It is built to end: it asks once per sitting what you came for, hides the related
+// videos while one plays, and when the video ends it takes YouTube's end screen away and shows a stop point
+// (rate it, done for now) instead of more videos. It also reports progress to the server every 15 seconds:
+// the position (to resume, and for "Continue watching") and the seconds actually played (today's tally, Review).
 
-let ytApi = null, player = null, progTimer = null;
+const INTENT_TTL = 3 * 3600e3;      // a sitting: the answer is remembered this long
+const INTENT_TEXT = { learn: 'to learn something', unwind: 'to unwind', one: 'for one video' };
+function getIntent() {
+  try { const i = JSON.parse(localStorage.getItem('pt-intent')); return i && Date.now() - i.ts < INTENT_TTL ? i : null; } catch { return null; }
+}
+function setIntent(kind, vid) {
+  try { localStorage.setItem('pt-intent', JSON.stringify({ kind, vid, ts: Date.now() })); } catch { /* private mode */ }
+}
+// Shown in place of the player before it starts: the first time in a sitting, and when "just this video" is over.
+function intentGate(box, again) {
+  box.innerHTML = again
+    ? `<div class="gate"><h3>You came for one video.</h3><p>Play this one too?</p><div class="actions">
+        <button class="pill" data-act="intent" data-kind="one">Yes, this one too</button>
+        <a class="pill solid" href="#/done">No, I'm done</a></div></div>`
+    : `<div class="gate"><h3>What are you here for?</h3><div class="actions">
+        <button class="pill" data-act="intent" data-kind="learn">Learn something</button>
+        <button class="pill" data-act="intent" data-kind="unwind">Unwind</button>
+        <button class="pill" data-act="intent" data-kind="one">Just this video</button></div></div>`;
+}
+
+let ytApi = null, player = null, progTimer = null, flushProgress = null;
 function loadYT() {
   if (!ytApi) ytApi = new Promise((res, rej) => {
     window.onYouTubeIframeAPIReady = () => res(window.YT);
@@ -329,13 +343,38 @@ function loadYT() {
 }
 function stopPlayer() {
   clearInterval(progTimer);
+  if (flushProgress) { flushProgress(); flushProgress = null; }
   if (player) { try { player.destroy(); } catch { /* already gone */ } player = null; }
+}
+// The stop point: replaces the player when a video ends.
+function stopScreen(vid, today) {
+  const box = $('#player'), v = CARDS[vid] || {}, it = getIntent();
+  if (!box) return;
+  delete box.dataset.on;
+  v.resume = 0;                     // Replay starts from the beginning
+  const one = it && it.kind === 'one';
+  const line = [tallyText(today), it ? 'You came ' + INTENT_TEXT[it.kind] : ''].filter(Boolean).join(' &middot; ');
+  box.innerHTML = `<div class="gate">
+    <h3>Finished.</h3>${line ? `<p>${line}</p>` : ''}
+    <p class="ask">Was it worth your time?</p>
+    <div class="actions"><button class="pill ${v.rating > 0 ? 'on' : ''}" data-act="like">${I.like} Worth it</button>
+      <button class="pill ${v.rating < 0 ? 'on' : ''}" data-act="dislike">${I.dislike} Not really</button></div>
+    ${v.next_in && !one ? `<p>Next in ${esc(v.next_in.playlist)}: <a href="#/v/${v.next_in.vid}">${esc(v.next_in.title)}</a></p>` : ''}
+    <div class="actions"><a class="pill solid" href="#/done">Done for now</a><a class="pill" href="#/">Back to today</a>
+      ${!one && $('.watch .secondary') ? '<button class="pill" data-act="showrel">Show related</button>' : ''}
+      <button class="pill" data-act="play">${I.refresh} Replay</button></div></div>`;
 }
 async function startPlayer(vid) {
   const box = $('#player');
   if (!box || box.dataset.on) return;
+  if (B.settings.ask_intent && !box.dataset.asked) {
+    const it = getIntent();
+    if (!it || (it.kind === 'one' && it.vid !== vid)) return intentGate(box, !!it);
+  }
   box.dataset.on = 1;
   box.innerHTML = '<div id="yt"></div>';
+  const watch = $('.watch');
+  if (watch) watch.classList.add('playing');
   const giveUp = why => {
     stopPlayer();
     box.innerHTML = `<div class="msg"><p>${esc(why)} <a href="https://www.youtube.com/watch?v=${vid}" target="_blank" rel="noopener">Open it on YouTube instead.</a></p></div>`;
@@ -343,28 +382,50 @@ async function startPlayer(vid) {
   let YT;
   try { YT = await loadYT(); } catch (e) { return giveUp('Sorry, ' + e.message + '.'); }
   if (!$('#yt')) return;  // navigated away while the player script loaded
-  const key = 'pt-pos-' + vid;
-  let start = 0;
-  try { start = +localStorage.getItem(key) || 0; } catch { /* private mode */ }
+  let start = (CARDS[vid] && CARDS[vid].resume) || 0;
+  try { start = start || +localStorage.getItem('pt-pos-' + vid) || 0; localStorage.removeItem('pt-pos-' + vid); } catch { /* positions used to live here */ }
   let marked = !!(CARDS[vid] && CARDS[vid].watched);
   const mark = () => { if (!marked) { marked = true; setWatched(vid, true).catch(fail); } };
+  let played = 0, wasPlaying = false, lastTick = Date.now(), lastSent = Date.now(), pos = 0, dur = 0;
+  let today = CARDS[vid] && CARDS[vid].today;
+  const send = () => {
+    const body = { pos, dur, played };
+    played = 0; lastSent = Date.now();
+    return api('/progress/' + vid, body).then(r => { today = r; }).catch(() => { /* next one will carry on */ });
+  };
   const check = () => {
     if (!player || !player.getDuration) return;
+    const now = Date.now();
+    if (wasPlaying) played += Math.min((now - lastTick) / 1000, 10);
+    lastTick = now;
+    wasPlaying = player.getPlayerState() === YT.PlayerState.PLAYING;
     const d = player.getDuration(), t = player.getCurrentTime();
     if (!d) return;
-    try { if (t > 30 && t < d * 0.9) localStorage.setItem(key, Math.floor(t)); else localStorage.removeItem(key); } catch { /* ignore */ }
+    pos = t; dur = d;
     if (t >= d * 0.9) mark();
+    if (now - lastSent >= 15000 && played > 0) send();
   };
+  flushProgress = () => { check(); if (dur) send(); };
   player = new YT.Player('yt', {
     host: 'https://www.youtube-nocookie.com', videoId: vid, width: '100%', height: '100%',
     playerVars: { autoplay: 1, rel: 0, playsinline: 1, start },
     events: {
-      onStateChange: e => { if (e.data === YT.PlayerState.ENDED) mark(); check(); },
+      onStateChange: async e => {
+        check();
+        if (e.data !== YT.PlayerState.ENDED) return;
+        mark();
+        flushProgress = null;
+        await send();
+        stopPlayer();
+        stopScreen(vid, today);
+      },
       onError: () => giveUp("YouTube won't play this one here (the uploader may have turned off embedding, or it is gone)."),
     },
   });
   progTimer = setInterval(check, 5000);
 }
+// closing the tab mid-video: hand the last position and seconds to the browser to deliver
+addEventListener('pagehide', () => { if (flushProgress) flushProgress(); });
 
 function channelRow(c, right) {
   return `<div class="r"><div class="avatar">${initial(c.name)}</div>
@@ -386,13 +447,13 @@ async function pageFollowing(tab) {
   const chans = tab === 'channels';
   const total = d.channels.length;
   let h = `<div class="pagehead"><h2>Following</h2>
-    <p class="sub">Followed channels show up more often in Today's Mix, and (with a YouTube key) their new uploads land here.</p></div>
+    <p class="sub">Followed channels show up more often among your suggestions, and (with a YouTube key) their new uploads land here and in your queue.</p></div>
     <div class="tabs"><a href="#/following" class="${chans ? '' : 'on'}">Videos</a><a href="#/following/channels" class="${chans ? 'on' : ''}">Channels <span class="muted">${total}</span></a>
       <span class="grow"></span>${chans ? '' : `<button class="pill" data-act="refresh" ${noKey}>${I.refresh} Check for new uploads</button>`}</div>`;
-  if (!B.has_key) h += '<p class="note">No YouTube API key in this session, so new uploads can\'t be fetched. HN-recommended videos from followed channels still work. See <a href="#/setup">Settings</a>.</p>';
+  if (!B.has_key) h += '<p class="note">No YouTube API key in this session, so new uploads can\'t be fetched. Library videos from followed channels still work. See <a href="#/setup">Settings</a>.</p>';
   if (chans) {
     h += `<div class="forms">
-      <form id="chanfind"><input class="field" type="text" name="q" placeholder="Find a channel in the HN data" aria-label="Find a channel"><button class="pill">Find</button></form>
+      <form id="chanfind"><input class="field" type="text" name="q" placeholder="Find a channel in the library" aria-label="Find a channel"><button class="pill">Find</button></form>
       <form id="chanurl"><input class="field" type="text" name="url" placeholder="Or any @handle / channel URL" aria-label="Channel URL or handle" ${B.has_key ? '' : 'disabled'}><button class="pill" ${noKey}>Follow</button></form>
       <label class="pill" title="Pick subscriptions.csv from a Google Takeout export of YouTube">Import subscriptions<input type="file" id="subsfile" accept=".csv,text/csv" hidden></label>
     </div><div id="chanresults"></div>`;
@@ -402,7 +463,7 @@ async function pageFollowing(tab) {
         ${total > 12 ? `<input class="field" id="chanfilter" type="search" placeholder="Filter your ${total} channels" aria-label="Filter your channels" value="${esc(chanFilter)}">` : ''}
         <div class="chlist" id="chanlist">${list.map(c => `<div class="ch" data-name="${esc(c.name.toLowerCase())}">
           <a class="name" href="#/channel/${enc(c.name)}"><b>${esc(c.name)}</b>
-            <span class="sub">${c.hn ? `${c.hn} HN pick${c.hn === 1 ? '' : 's'}, ${c.unwatched} unwatched` : (c.checked ? 'Uploads only' : 'Not checked yet')}</span></a>
+            <span class="sub">${c.hn ? `${c.hn} in the library, ${c.unwatched} unwatched` : (c.checked ? 'Uploads only' : 'Not checked yet')}</span></a>
           ${c.new ? `<span class="new">${c.new} new</span>` : ''}
           <button class="unf" data-follow="${esc(c.name)}" data-on="1" title="Unfollow ${esc(c.name)}" aria-label="Unfollow ${esc(c.name)}">${I.close}</button></div>`).join('')}</div>
         <p class="empty" id="channone" hidden>No followed channel matches that.</p>`;
@@ -410,8 +471,8 @@ async function pageFollowing(tab) {
       h += '<p class="empty">You are not following anyone yet. Try the search box, or the Follow button on any video.</p>';
     }
   } else {
-    if (d.uploads.length) h += '<h3 class="sechead">Fresh uploads <span class="muted" style="font-weight:400;font-size:14px">not HN-vetted</span></h3>' + grid(d.uploads);
-    if (d.picks.length) h += '<h3 class="sechead">HN picks from channels you follow</h3>' + grid(d.picks);
+    if (d.uploads.length) h += '<h3 class="sechead">Uploads</h3>' + grid(d.uploads);
+    if (d.picks.length) h += '<h3 class="sechead">From the library</h3>' + grid(d.picks);
     if (!d.uploads.length && !d.picks.length) h += total
       ? '<p class="empty">Nothing unwatched from the channels you follow right now.</p>'
       : '<p class="empty">You are not following anyone yet. Add channels on the <a class="link" href="#/following/channels">Channels</a> tab, or use the Follow button on any video.</p>';
@@ -424,13 +485,13 @@ async function pagePlaylists() {
   const d = await api('/playlists');
   const noKey = B.has_key ? '' : 'disabled title="Needs a YouTube API key"';
   let h = `<div class="pagehead"><h2>Playlists</h2>
-    <p class="sub">The next unwatched video of every playlist gets a strong push into Today's Mix (about two days in three).</p></div>
+    <p class="sub">The next unwatched video of a few playlists is put in your queue on the home page each day.</p></div>
     <div class="forms">
       <form id="plnew"><input class="field" type="text" name="name" placeholder="New playlist name" aria-label="New playlist name"><button class="pill">Create</button></form>
       <form id="plimport"><input class="field" type="text" name="url" placeholder="YouTube playlist or channel URL" aria-label="YouTube playlist URL, or a channel URL or @handle to pick from its playlists" title="A playlist URL imports that playlist. A channel URL or @handle lists the channel's public playlists to pick from." ${B.has_key ? '' : 'disabled'}><button class="pill" ${noKey}>Import</button></form>
       <label class="pill" title="Pick the CSV files in the &quot;YouTube and YouTube Music/playlists&quot; folder of a Google Takeout export (select them all at once)">Import from Takeout<input type="file" id="plfiles" accept=".csv,text/csv" multiple hidden></label>
     </div><div id="plresults"></div>`;
-  if (!B.has_key) h += '<p class="note">Importing playlists by playlist or channel URL needs a YouTube API key in this session, and so do the details of Takeout videos from outside the HN data. See <a href="#/setup">Settings</a>.</p>';
+  if (!B.has_key) h += '<p class="note">Importing playlists by playlist or channel URL needs a YouTube API key in this session, and so do the details of Takeout videos from outside the library. See <a href="#/setup">Settings</a>.</p>';
   if (d.items.length) {
     h += `<div class="pgrid">${d.items.map(p => `<a class="plcard" href="#/playlist/${p.id}" ${p.next ? `data-vid="${(CARDS[p.next.vid] = p.next).vid}"` : ''}>
       <div class="thumb ${p.next ? '' : 'blank'}">${p.next ? timg(p.next) : I.list}<span class="plcount">${p.done}/${p.total} watched</span></div>
@@ -485,7 +546,7 @@ async function pageForYou(p) {
   const f = filterParams(p, ['len', 'type', 'area']);
   const d = await api('/foryou?' + qs(f));
   let h = `<div class="pagehead"><h2>For You</h2>
-    <p class="sub">Unwatched videos closest to what you liked. Each one says which like it comes from; Today's Mix leans the same way.</p></div>`
+    <p class="sub">Unwatched videos closest to what you liked. Each one says which like it comes from; the suggestions on the home page lean the same way.</p></div>`
     + filterBar('#/foryou', {}, f, d.items.length ? `<span class="muted">from ${d.likes} like${d.likes === 1 ? '' : 's'} and your history</span>` : '');
   if (d.items.length) h += grid(d.items);
   else if (!d.likes && !d.watched) h += `<p class="empty">Nothing to go on yet. Like a few videos (the thumbs-up on a video's page, or the three-dot menu on any card) and recommendations will show up here.</p>`;
@@ -495,13 +556,13 @@ async function pageForYou(p) {
 
 async function pageLiked() {
   const d = await api('/liked');
-  let h = `<div class="pagehead"><h2>Liked</h2><p class="sub">${d.items.length ? 'Videos you gave a thumbs-up, newest first. These steer For You and Today\'s Mix.' : 'No likes yet. Use the thumbs-up on a video\'s page, or the three-dot menu on any card.'}</p></div>` + (d.items.length ? grid(d.items) : '');
+  let h = `<div class="pagehead"><h2>Liked</h2><p class="sub">${d.items.length ? 'Videos you gave a thumbs-up, newest first. These steer For You and the suggestions on the home page.' : 'No likes yet. Use the thumbs-up on a video\'s page, or the three-dot menu on any card.'}</p></div>` + (d.items.length ? grid(d.items) : '');
   if (d.disliked.length) h += `<h3 class="sechead">Disliked</h3><div class="rows">${d.disliked.map(v => `<div class="r plain" data-vid="${v.vid}">
     <div class="name"><a href="#/v/${v.vid}">${esc(v.title)}</a></div><button class="pill" data-act="unrate">Remove dislike</button></div>`).join('')}</div>`;
   main(h);
 }
 
-// every topic area with its categories, plus quick ways into the whole collection (after hackertube.org/categories)
+// every topic area with its categories, plus quick ways into the whole collection
 function pageCategories() {
   const meta = (to, label) => B.has_meta ? `<a class="pill" href="${to}">${label}</a>`
     : `<button class="pill" disabled title="Needs data from YouTube; see Settings">${label}</button>`;
@@ -525,7 +586,9 @@ function pageSetup() {
       <input type="checkbox" class="switch" data-set="${key}" ${B.settings[key] ? 'checked' : ''}></label>`;
   main(`<div class="pagehead"><h2>Settings</h2></div>
     <div class="about">
-    ${sw('hide_watched', 'Hide played videos', 'Watched videos disappear from Today\'s Mix, Browse, search, channel pages and related videos instead of showing dimmed. History, Liked and playlists still list them.')}
+    ${sw('ask_intent', 'Ask what I am here for', 'Before the first video of a sitting, one tap: learn something, unwind, or just this video. The answer is shown back when a video ends, counted on the Review page, and "just this video" checks with you before playing a second one.')}
+    ${sw('calm', 'Calm presentation', 'No view counts, and no "new" dots or badges asking for attention. Uploads from followed channels still arrive in your queue.')}
+    ${sw('hide_watched', 'Hide played videos', 'Watched videos disappear from the home page, Browse, search, channel pages and related videos instead of showing dimmed. History, Liked and playlists still list them.')}
     ${sw('dearrow', 'Video frames and plain titles (DeArrow)', 'Show a frame from the video instead of the uploader\'s thumbnail, and the community-written title from <a href="https://dearrow.ajay.app" target="_blank" rel="noopener">DeArrow</a> where one exists. Hover a title to see the original. Video ids are looked up on DeArrow\'s servers (by hash prefix).')}
     <h3 class="sechead">YouTube API key</h3>
     <p class="fine" style="margin-top:4px">For durations, new uploads and playlist import.</p>
@@ -533,7 +596,7 @@ function pageSetup() {
       <div class="stat"><b>${B.has_meta.toLocaleString()}</b><span>of ${B.total.toLocaleString()} videos have durations</span></div>
       <div class="stat"><b>${B.has_key ? 'Connected' : 'Not set'}</b><span>YouTube API key in this session</span></div>
     </div>
-    <p>The HN data ships without YouTube's own metadata. A free key (no credit card, about 5 minutes) unlocks the length filter, new uploads from followed channels, and playlist import.</p>
+    <p>The video library ships without YouTube's own metadata. A free key (no credit card, about 5 minutes) unlocks the length filter, new uploads from followed channels, and playlist import.</p>
     <ol class="steps">
       <li>Open <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">console.cloud.google.com</a> and sign in.</li>
       <li>Top bar &rarr; project picker &rarr; <b>New project</b> (any name, e.g. "personaltube").</li>
@@ -549,9 +612,42 @@ pixi run start          # restart the app; it reads the key from the keyring</pr
       Re-run <code>pixi run fetch-meta --refresh</code> every few months to keep durations and deletions current.</p></div>`);
 }
 
+// The last seven days, laid out for you to judge rather than to keep you going.
+async function pageReview() {
+  const d = await api('/review');
+  const max = Math.max(...d.days.map(x => x.secs), 1);
+  const rated = d.worth + d.not_worth;
+  const diff = d.total - d.prev;
+  const came = Object.entries(d.intents).filter(([, n]) => n).map(([k, n]) => `${n}&times; ${INTENT_TEXT[k]}`).join(', ');
+  const list = (title, rows) => rows.length ? `<div><h4>${title}</h4>${rows.map(r => `<div class="rrow"><span>${esc(r.name)}</span><span class="muted">${fmtMin(r.secs)}</span></div>`).join('')}</div>` : '';
+  main(`<div class="pagehead"><h2>Review</h2><p class="sub">Your last seven days here: how long you watched, and whether it was worth it.</p></div>
+    <div class="review">
+    <div class="stats">
+      <div class="stat"><b>${fmtMin(d.total)}</b><span>played this week${d.prev ? ` &middot; ${fmtMin(Math.abs(diff))} ${diff >= 0 ? 'more' : 'less'} than the week before` : ''}</span></div>
+      <div class="stat"><b>${d.finished.length}</b><span>video${d.finished.length === 1 ? '' : 's'} finished</span></div>
+      <div class="stat"><b>${rated ? `${d.worth} of ${rated}` : '&ndash;'}</b><span>rated worth your time${d.unrated ? ` &middot; ${d.unrated} not rated` : ''}</span></div>
+    </div>
+    ${d.total ? '' : '<p class="note">Playback time is counted from now on, so this fills in as you watch.</p>'}
+    <div class="days">${d.days.map(x => `<div class="rrow"><span>${new Date(x.day + 'T12:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' })}</span>
+      <span class="progress"><i style="width:${100 * x.secs / max}%"></i></span><span class="muted">${x.secs ? fmtMin(x.secs) : '&ndash;'}</span></div>`).join('')}</div>
+    ${came ? `<p class="came">You came ${came}.</p>` : ''}
+    <div class="where">${list('Where the time went', d.areas)}${list('Channels', d.channels)}</div>
+    </div>
+    ${d.finished.length ? '<h3 class="sechead">Finished this week</h3>' + grid(d.finished) : ''}`);
+}
+
+// Where "Done for now" leads: nothing to click on.
+async function pageDone() {
+  await reboot();
+  main(`<div class="donepage"><h2>That's it for now.</h2>
+    ${tallyText(B.tally) ? `<p>${esc(tallyText(B.tally))}.</p>` : ''}
+    <p class="muted">Your queue will still be here. You can close this tab.</p>
+    <p><a class="link" href="#/review">This week in review</a></p></div>`);
+}
+
 // ---------------------------------------------------------------- router
 
-const notFound = () => main('<div class="pagehead"><h2>Page not found</h2><p class="sub">There is nothing at this address. <a class="link" href="#/">Back to Today\'s Mix</a></p></div>');
+const notFound = () => main('<div class="pagehead"><h2>Page not found</h2><p class="sub">There is nothing at this address. <a class="link" href="#/">Back to today</a></p></div>');
 const routeName = () => location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
 
 async function route() {
@@ -562,7 +658,7 @@ async function route() {
   const p = Object.fromEntries(new URLSearchParams(qs));
   const [name, ...rest] = path.split('/');
   const arg = decodeURIComponent(rest.join('/'));
-  const tab = { '': 'mix', foryou: 'foryou', liked: 'liked', browse: 'browse', categories: 'categories', a: 'categories', c: 'categories', channel: 'following', following: 'following', playlists: 'playlists', playlist: 'playlists', history: 'history', setup: 'setup' }[name];
+  const tab = { '': 'mix', foryou: 'foryou', liked: 'liked', browse: 'browse', categories: 'categories', a: 'categories', c: 'categories', channel: 'following', following: 'following', playlists: 'playlists', playlist: 'playlists', history: 'history', review: 'review', setup: 'setup' }[name];
   document.querySelectorAll('#side .nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
   $('#search input').value = name === 'browse' ? (p.q || '') : '';
   try {
@@ -578,6 +674,8 @@ async function route() {
     else if (name === 'history') await pageHistory();
     else if (name === 'foryou') await pageForYou(p);
     else if (name === 'liked') await pageLiked();
+    else if (name === 'review') await pageReview();
+    else if (name === 'done') await pageDone();
     else if (name === 'categories') pageCategories();
     else if (name === 'setup') pageSetup();
     else notFound();
@@ -640,7 +738,7 @@ function markRated(vid, r) {
   });
 }
 // pages where the "hide played videos" setting removes a video as soon as it is marked watched
-const hidesWatched = () => B.settings.hide_watched && !/^#\/(v|playlist|history|liked|setup)/.test(location.hash);
+const hidesWatched = () => B.settings.hide_watched && !/^#\/(v|playlist|history|liked|review|setup)/.test(location.hash);
 async function setWatched(vid, on) {
   const r = await api('/watched/' + vid, { watched: on });
   if (on && hidesWatched()) { toast('Marked watched and hidden. Undo from History.'); return refresh(); }
@@ -724,6 +822,13 @@ document.addEventListener('click', async e => {
         return menuPopup(vid, t, host);
       case 'watch': location.hash = `#/v/${vid}?play=1`; return;
       case 'play': e.preventDefault(); return startPlayer(vid);
+      case 'intent': {
+        api('/intent', { intent: t.dataset.kind }).catch(() => { /* only a count for the Review page */ });
+        setIntent(t.dataset.kind, vid);
+        $('#player').dataset.asked = 1;
+        return startPlayer(vid);
+      }
+      case 'showrel': t.remove(); $('.watch').classList.remove('playing'); return;
       case 'seen': return setWatched(vid, !(CARDS[vid] && CARDS[vid].watched));
       case 'list': e.stopPropagation(); return listPopup(vid, anchor, host);
       case 'like': case 'dislike': case 'unrate': {
@@ -751,7 +856,7 @@ document.addEventListener('click', async e => {
       case 'reshuffle':
         await api('/reshuffle', {});
         if (routeName() === '') await route(); else location.hash = '#/';
-        return toast('Shuffled. A new mix for today.');
+        return toast('Different suggestions dealt.');
       case 'refresh': {
         t.disabled = true; t.textContent = 'Checking…';
         const r = await api('/refresh_uploads', {});
@@ -829,11 +934,11 @@ document.addEventListener('change', async e => {
       const fresh = d.items.filter(c => !c.followed);
       $('#chanresults').innerHTML = `<div class="rows">
         <div class="r plain subhead"><div class="name"><b>${d.items.length} subscription${d.items.length === 1 ? '' : 's'} in ${esc(file.name)}</b>
-          <div class="sub">${fresh.length} not followed yet &middot; ${fresh.filter(c => c.hn).length} of those have HN picks</div></div>
-          <button class="pill" data-act="subsall">All</button><button class="pill" data-act="subshn">Only with HN picks</button><button class="pill" data-act="subsnone">None</button>
+          <div class="sub">${fresh.length} not followed yet &middot; ${fresh.filter(c => c.hn).length} of those are in the library</div></div>
+          <button class="pill" data-act="subsall">All</button><button class="pill" data-act="subshn">Only those in the library</button><button class="pill" data-act="subsnone">None</button>
           <button class="pill solid" data-act="subsgo" id="subsgo"></button></div>
         ${d.items.map(c => `<label class="r plain"><input type="checkbox" class="subpick" data-id="${esc(c.id)}" data-name="${esc(c.name)}" data-hn="${c.hn}" ${c.followed ? 'disabled' : 'checked'}>
-          <div class="name"><b>${esc(c.name)}</b><div class="sub">${c.hn ? `${c.hn} HN pick${c.hn === 1 ? '' : 's'}` : 'Not in the HN data'}</div></div>
+          <div class="name"><b>${esc(c.name)}</b><div class="sub">${c.hn ? `${c.hn} in the library` : 'Not in the library'}</div></div>
           ${c.followed ? '<span class="muted">Already following</span>' : ''}</label>`).join('')}</div>`;
       subsCount();
     } catch (err) { fail(err); }
@@ -850,11 +955,11 @@ document.addEventListener('change', async e => {
       $('#plresults').innerHTML = `<div class="rows">
         <div class="r plain subhead"><div class="name"><b>${d.items.length} playlist${d.items.length === 1 ? '' : 's'} found</b>
           <div class="sub">${[d.empty.length && `${d.empty.length} file${d.empty.length === 1 ? '' : 's'} without videos skipped`,
-            unknown && !B.has_key && `${unknown} videos from outside the HN data will stay hidden until you sync with a YouTube key`].filter(Boolean).join(' &middot; ')}</div></div>
+            unknown && !B.has_key && `${unknown} videos from outside the library will stay hidden until you sync with a YouTube key`].filter(Boolean).join(' &middot; ')}</div></div>
           <button class="pill" data-act="plall">All</button><button class="pill" data-act="plnone">None</button>
           <button class="pill solid" data-act="plgo" id="plgo"></button></div>
         ${d.items.map((p, i) => { const done = p.existing && !p.new; return `<label class="r plain"><input type="checkbox" class="plpick" data-i="${i}" ${done ? 'disabled' : 'checked'}>
-          <div class="name"><b>${esc(p.name)}</b><div class="sub">${p.total} video${p.total === 1 ? '' : 's'} &middot; ${p.hn} in the HN data</div></div>
+          <div class="name"><b>${esc(p.name)}</b><div class="sub">${p.total} video${p.total === 1 ? '' : 's'} &middot; ${p.hn} in the library</div></div>
           ${done ? '<span class="muted">Already imported</span>' : p.existing ? `<span class="muted">Adds ${p.new} to your existing playlist</span>` : ''}</label>`; }).join('')}</div>`;
       plCount();
     } catch (err) { fail(err); }
@@ -864,7 +969,7 @@ document.addEventListener('change', async e => {
   if (e.target.classList.contains('plpick')) return plCount();
   if (e.target.classList.contains('subpick')) return subsCount();
   if (e.target.dataset.set) {
-    try { B.settings = await api('/settings', { [e.target.dataset.set]: e.target.checked }); toast('Saved.'); }
+    try { B.settings = await api('/settings', { [e.target.dataset.set]: e.target.checked }); renderSide(); toast('Saved.'); }
     catch (err) { e.target.checked = !e.target.checked; fail(err); }
   }
 });
@@ -901,9 +1006,9 @@ document.addEventListener('submit', async e => {
     } else if (f.id === 'chanfind') {
       const r = await api('/channels?q=' + enc(data.q));
       $('#chanresults').innerHTML = r.items.length ? `<div class="rows">${r.items.map(c => channelRow(
-        { name: c.name, sub: `${c.count} HN pick${c.count === 1 ? '' : 's'}` },
+        { name: c.name, sub: `${c.count} video${c.count === 1 ? '' : 's'} in the library` },
         `<button class="pill ${c.followed ? '' : 'solid'}" data-follow="${esc(c.name)}" data-on="${c.followed ? 1 : 0}">${c.followed ? 'Unfollow' : 'Follow'}</button>`)).join('')}</div>`
-        : '<p class="empty">No channel by that name in the HN data.</p>';
+        : '<p class="empty">No channel by that name in the library.</p>';
     }
   } catch (err) { fail(err); }
 });

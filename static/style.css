@@ -1,4 +1,4 @@
-/* PersonalTube: a clean video-site layout in the style of hackertube.org. Light and dark. */
+/* PersonalTube: a clean, quiet video-site layout. Light and dark. */
 :root {
   --bg: #ffffff; --bg2: #f2f2f2; --bg3: #e5e5e5; --text: #0f0f0f; --muted: #606060;
   --line: #e5e5e5; --accent: #0b8574; --on-accent: #ffffff; --chip: #f2f2f2; --chip-on: #0f0f0f; --chip-on-text: #ffffff;
@@ -175,17 +175,14 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
 .via.taste { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .kebab { margin: -4px -8px 0 0; }
 
-/* today's feature */
-.lead { display: flex; gap: 24px; align-items: flex-start; margin-top: 16px; padding: 16px; border-radius: 16px; background: var(--bg2); }
-.lead .thumb { width: min(46%, 520px); flex: none; background: var(--bg3); }
-.lead .body { flex: 1; min-width: 0; display: flex; gap: 4px; align-items: flex-start; }
-.lead .text { flex: 1; min-width: 0; }
-.lead .eyebrow { font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); margin-bottom: 6px; }
-.lead .vt { font-size: 24px; line-height: 30px; font-weight: 700; -webkit-line-clamp: 3; margin-bottom: 6px; }
-.lead .why { margin-top: 12px; line-height: 20px; }
-.lead .via { background: var(--bg3); }
-.lead .actions { margin-top: 16px; }
-.lead .pill:not(.solid) { background: var(--bg3); }
+/* home: a few short sections and an end */
+.hsec > .sub { margin-top: 2px; }
+.hsec .grid { padding-top: 12px; }
+.endnote { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 48px; padding-top: 20px;
+           border-top: 1px solid var(--line); color: var(--muted); }
+.tprog { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255,255,255,.35); pointer-events: none; }
+.tprog i { display: block; height: 100%; background: var(--accent); }
+.via.branch { color: var(--accent); }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 /* compact rows: related videos, playlist entries */
@@ -229,15 +226,44 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
 .tag { font-size: 12px; line-height: 18px; padding: 2px 8px; border-radius: 6px; background: var(--bg3); }
 a.tag { font-weight: 500; }
 a.tag:hover { background: var(--chip-on); color: var(--chip-on-text); }
-.comments h2 { font-size: 20px; margin: 24px 0 16px; }
+.comments { margin-top: 16px; }
+.comments summary { cursor: pointer; font-size: 16px; font-weight: 500; padding: 8px 0; }
+.comments .why { color: var(--muted); margin: 8px 0 20px; line-height: 20px; max-width: 760px; }
+/* while a video plays there is nothing beside it; the stop screen can bring the related list back */
+.watch.playing .secondary { display: none; }
+/* shown inside the player box: the "what are you here for?" question and the stop point after a video */
+.gate { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 12px; padding: 24px; text-align: center; background: #181818; color: #eee; overflow: auto; }
+.gate h3 { font-size: 22px; font-weight: 700; }
+.gate p { color: #bbb; max-width: 560px; }
+.gate p.ask { color: #eee; margin-top: 8px; }
+.gate p a { color: #fff; text-decoration: underline; }
+.gate .actions { justify-content: center; }
+.gate .pill { background: #333; color: #eee; }
+.gate .pill:hover:not(:disabled) { background: #444; }
+.gate .pill.solid { background: #eee; color: #111; }
+.gate .pill.solid:hover:not(:disabled) { background: #fff; opacity: 1; }
+.gate .pill.on { background: #555; }
+.gate .pill.on svg { color: #3ea6ff; }
+.donepage { max-width: 520px; margin: 18vh auto 0; text-align: center; }
+.donepage h2 { font-size: 28px; margin-bottom: 12px; }
+.donepage p { margin-top: 8px; }
+/* weekly review */
+.review { max-width: 720px; }
+.rrow { display: flex; align-items: center; gap: 12px; padding: 5px 0; }
+.rrow > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.days .rrow > span:first-child { flex: none; width: 64px; }
+.days .progress { flex: 1; height: 8px; border-radius: 4px; }
+.days .rrow > span:last-child { flex: none; width: 84px; text-align: right; }
+.review .came { margin-top: 16px; color: var(--muted); }
+.where { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 40px; margin-top: 24px; }
+.where h4 { margin: 0 0 6px; font-size: 14px; font-weight: 500; }
 .cmt { display: flex; gap: 16px; margin-bottom: 20px; }
 .cmt .meta { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
 .cmt .meta b { color: var(--text); font-weight: 500; margin-right: 4px; font-size: 13px; }
 .cmt .body { overflow-wrap: anywhere; line-height: 20px; white-space: pre-line; }
 .cmt .foot { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); align-items: center; margin-top: 4px; }
 .cmt .foot a:hover { color: var(--text); }
-.stance.strong_rec { color: var(--text); font-weight: 500; }
-.stance.critical { color: var(--bad); }
 
 /* ---------------------------------------------------------------- lists */
 .forms { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 16px; align-items: center; }
@@ -344,9 +370,6 @@ pre { font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; background
   .search button { width: 44px; }
   .icon { width: 34px; }
   .grid, .pgrid { grid-template-columns: 1fr; gap: 24px; }
-  .lead { flex-direction: column; gap: 12px; padding: 12px; }
-  .lead .thumb { width: 100%; }
-  .lead .vt { font-size: 20px; line-height: 26px; }
   .watch { padding-top: 0; }
   .player { border-radius: 0; margin: 0 -16px; }
   .plrows li { flex-wrap: wrap; }

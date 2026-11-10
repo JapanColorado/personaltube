@@ -1,4 +1,4 @@
-"""PersonalTube: a local daily mix of HN-recommended videos.  Run with:  pixi run start"""
+"""PersonalTube: a local, personal video front page that works for the viewer.  Run with:  pixi run start"""
 import csv
 import hashlib
 import io
@@ -41,11 +41,14 @@ if __name__ == "__main__":
 # Content types in the daily mix by default (interviews, podcasts and news are filter-only).
 DEFAULT_TYPES = {"talk", "lecture", "course", "tutorial", "explainer", "documentary",
                  "demo", "comedy", "music", "commentary", "other"}
-MIX_SIZE = 13            # 1 lead + 12
+HOME_CONTINUE, HOME_PLAYLISTS, HOME_UPLOADS = 3, 3, 3   # home page: started videos, then "your queue"
+HOME_PICKS, HOME_BRANCH = 6, 3                          # then suggestions near your taste, and a few far from it
+BRANCH_MAX_AFFINITY = 0.05  # "branch out" only offers videos the taste model does not already lean towards
 MIN_UPLOAD_SECONDS = 180  # skip Shorts / tiny clips from followed channels
 NEW_DAYS = 14             # uploads this recent get the NEW! badge
 LEN_BUCKETS = {"short": (0, 20 * 60), "medium": (20 * 60, 60 * 60), "long": (60 * 60, 10 ** 9)}
-SETTINGS = ("hide_watched", "dearrow")  # on/off switches kept in kv as "1"/"0"
+# on/off switches kept in kv as "1"/"0", with the value used until the user first touches one
+SETTINGS = {"hide_watched": False, "dearrow": True, "calm": True, "ask_intent": True}
 WATCH_WEIGHT = 0.35       # a watched-but-unrated video counts this much of a like when judging taste
 TASTE_PULL = 3.0          # mix weight is multiplied by exp(TASTE_PULL * affinity), clipped to 0.2..15
 DEARROW_TTL = 7 * 86400   # re-ask DeArrow for a video's title/frame after this long
@@ -163,6 +166,9 @@ create table if not exists kv(k text primary key, v text);
 create table if not exists ratings(vid text primary key, rating integer, ts real);
 create table if not exists dearrow(vid text primary key, title text, time real, original integer, ts real);
 create table if not exists ytsearch(q text primary key, vids text, ts real);
+create table if not exists progress(vid text primary key, pos real, dur real, ts real);
+create table if not exists watchlog(day text, vid text, secs real, primary key(day, vid));
+create table if not exists intents(ts real, intent text);
 """
 
 
@@ -202,7 +208,8 @@ class State:
         self.follows = {r[0]: r[1] for r in c.execute("select channel, channel_id from follows")}
         self.extra = {r["vid"]: dict(r) for r in c.execute("select * from extra")}
         self.ratings = {r[0]: r[1] for r in c.execute("select vid, rating from ratings")}  # 1 liked, -1 disliked
-        self.settings = {k: kv_get(c, k, "0") == "1" for k in SETTINGS}
+        self.settings = {k: kv_get(c, k, "1" if on else "0") == "1" for k, on in SETTINGS.items()}
+        self.progress = {r["vid"]: dict(r) for r in c.execute("select * from progress")}  # started, not finished
         self.hide_watched = self.settings["hide_watched"]
         self.da = {}  # vid -> DeArrow title/frame, only what is cached and fresh; the frontend asks for the rest
         if self.settings["dearrow"]:
@@ -242,6 +249,10 @@ def card(vid, st):
     d["watched"] = vid in st.watched
     d["followed"] = d["channel"] in st.follows
     d["rating"] = st.ratings.get(vid, 0)
+    pr = st.progress.get(vid)
+    if pr and not d["watched"]:
+        d["resume"] = int(pr["pos"])
+        d["frac"] = round(pr["pos"] / pr["dur"], 3) if pr["dur"] else 0
     if vid in st.da:
         d["da"] = st.da[vid]
     return d
@@ -460,13 +471,27 @@ def taste_reason(t, vid, weak=True):
         return None
     title = V[source]["title"]
     title = title if len(title) <= 46 else title[:45].rstrip() + "…"
-    lead = {"liked": "Because you liked", "watched": "Because you watched", "graph": "Same HN fans as"}[kind]
+    lead = {"liked": "Because you liked", "watched": "Because you watched", "graph": "Often recommended with"}[kind]
     return {"kind": "taste", "text": f"{lead}: {title}", "vid": source}
 
 
+def today_tally(c):
+    """What has been played today: seconds of playback and how many videos got at least a minute of it."""
+    r = c.execute("select coalesce(sum(secs), 0), coalesce(sum(secs >= 60), 0) from watchlog where day=?",
+                  (date.today().isoformat(),)).fetchone()
+    return {"secs": int(r[0]), "videos": int(r[1])}
+
+
+def primary_area(vid):
+    cats = V[vid]["categories"] if vid in V else None
+    return (cats[0]["area"], cats[0]["area_name"]) if cats else ("-", "")
+
+
 def build_mix(c, area="", cat="", length="", types=None):
-    """Stable for the whole day: each video gets a fixed random draw from (date, reshuffle count),
-    so following a channel or watching something only nudges the mix instead of redealing it."""
+    """The home page, in the order the user's own intentions come first: videos they started, their queue (next in
+    playlists, uploads from followed channels), a few suggestions near their taste, and a few deliberately far
+    from it. It is a fixed, small page, stable for the whole day: each video gets a fixed random draw from
+    (date, reshuffle count), so following a channel or watching something only nudges it instead of redealing."""
     st = State(c)
     today = date.today()
     day0 = datetime.combine(today, datetime.min.time()).timestamp()
@@ -477,36 +502,46 @@ def build_mix(c, area="", cat="", length="", types=None):
     done |= {v for v, r in st.ratings.items() if r < 0}
     tst = taste(st)
     flt = dict(area=area, cat=cat, length=length)
-    picks, reasons = [], {}
+    reasons = {}
 
-    # 1. The next unwatched video of each saved playlist: ~65% chance per day each, up to 3.
+    # 0. Continue: started and not finished, most recent first.
+    cont = [v for v, p in sorted(st.progress.items(), key=lambda x: -x[1]["ts"])
+            if v not in st.watched and v not in st.hidden and st.available(v) and passes(v, st, **flt)][:HOME_CONTINUE]
+    used = set(cont)
+
+    # 1. Queue, part one: the next unwatched video of saved playlists, a different few each day.
+    nexts = []
     for p in playlist_rows(c):
         nxt = next((v for v in p["vids"] if v not in done and st.available(v)), None)
-        if nxt and nxt not in reasons and passes(nxt, st, **flt) and rnd(seed + "pl", nxt) < 0.65:
+        if nxt and nxt not in used and nxt not in reasons and passes(nxt, st, **flt):
             reasons[nxt] = {"kind": "next", "text": f"Next in: {p['name']}", "playlist": p["id"]}
-            picks.append(nxt)
-    picks = sorted(picks, key=lambda v: rnd(seed, v))[:3]
-    reasons = {v: reasons[v] for v in picks}
+            nexts.append(nxt)
+    nexts = sorted(nexts, key=lambda v: rnd(seed + "pl", v))[:HOME_PLAYLISTS]
 
-    # 2. Fresh uploads from followed channels: 50% if NEW, else 20%; up to 3, newest first.
+    # 2. Queue, part two: uploads from followed channels, recent ones first, one per channel.
     ups = [e for e in st.extra.values() if e["upload"] and e["channel"] in st.follows
-           and e["vid"] not in done and e["vid"] not in reasons and passes(e["vid"], st, **flt)]
-    n_up = 0
-    for e in sorted(ups, key=lambda e: e["published"] or "", reverse=True):
-        new = st.is_new(e["vid"])
-        if n_up < 3 and rnd(seed + "up", e["vid"]) < (0.5 if new else 0.2):
-            reasons[e["vid"]] = {"kind": "upload",
-                                 "text": "New from a channel you follow" if new else "From a channel you follow"}
-            picks.append(e["vid"])
-            n_up += 1
+           and e["vid"] not in done and e["vid"] not in used and e["vid"] not in reasons and passes(e["vid"], st, **flt)]
+    ups.sort(key=lambda e: (not st.is_new(e["vid"]), rnd(seed + "up", e["vid"])))
+    uploads, chans = [], set()
+    for e in ups:
+        if len(uploads) >= HOME_UPLOADS:
+            break
+        if e["channel"] in chans:
+            continue
+        chans.add(e["channel"])
+        uploads.append(e["vid"])
+        reasons[e["vid"]] = {"kind": "upload", "text": "New from a channel you follow" if st.is_new(e["vid"])
+                             else "From a channel you follow"}
+    queue = nexts + uploads
+    used |= set(queue)
 
-    # 3. Fill the rest by score-weighted sampling; followed channels get up to ~30% of the weight,
-    #    and videos close to the user's likes weigh up to 15x more (close to dislikes: down to 0.2x).
+    # 3. Picked for you: score-weighted sampling; followed channels get up to ~30% of the weight, and videos
+    #    close to the user's likes weigh up to 15x more (close to dislikes: down to 0.2x).
     types = types or DEFAULT_TYPES
     cands = []
     for v in VIDEOS:
         vid = v["vid"]
-        if (vid in done or vid in DUPES or vid in reasons or v["shelf_life"] == "news"
+        if (vid in done or vid in DUPES or vid in used or v["shelf_life"] == "news"
                 or v["hn"]["recommenders"] == 0 or META.get(vid, {}).get("gone")
                 or not passes(vid, st, types=types, **flt)):
             continue
@@ -514,34 +549,52 @@ def build_mix(c, area="", cat="", length="", types=None):
         cands.append((vid, v["score"] ** 1.5 * pull, v["channel"] in st.follows))
     w_f = sum(w for _, w, f in cands if f)
     w_r = sum(w for _, w, f in cands if not f)
-    share = min(0.3, 0.08 * len(st.follows))  # one follow: ~1 slot a day; four or more: ~4 slots
+    share = min(0.3, 0.08 * len(st.follows))
     boost = min(200.0, max(1.0, share * w_r / w_f)) if w_f else 1.0
     ranked = sorted(cands, key=lambda x: rnd(seed, x[0]) ** (1 / (x[1] * (boost if x[2] else 1))), reverse=True)
-    per_channel, per_area, sampled = Counter(), Counter(), []
+    per_channel, per_area, picks = Counter(), Counter(), []
     for vid, _, followed in ranked:
-        if len(picks) + len(sampled) >= MIX_SIZE:
+        if len(picks) >= HOME_PICKS:
             break
-        v = V[vid]
-        a = v["categories"][0]["area"] if v["categories"] else "-"
-        if per_channel[v["channel"]] >= 2 or (not (area or cat) and per_area[a] >= 4):
+        ch, a = V[vid]["channel"], primary_area(vid)[0]
+        if per_channel[ch] >= 1 or (not (area or cat) and per_area[a] >= 2):
             continue
-        per_channel[v["channel"]] += 1
+        per_channel[ch] += 1
         per_area[a] += 1
-        sampled.append(vid)
+        picks.append(vid)
         if followed:
             reasons[vid] = {"kind": "following", "text": "You follow this channel"}
         elif tst["aff"].get(vid, 0) >= 0.4 and taste_reason(tst, vid, weak=False):
             reasons[vid] = taste_reason(tst, vid, weak=False)
+    used |= set(picks)
 
-    lead = max(sampled, key=lambda v: V[v]["score"]) if sampled else (picks[0] if picks else None)
-    rest = [v for v in picks + sorted(sampled, key=lambda v: rnd(seed + "o", v)) if v != lead]
+    # 4. Branch out: good videos the taste model does not lean towards, from the topic areas the user has
+    #    watched and liked least, one per area. Skipped under a topic filter, which already says where to look.
+    branch = []
+    if not (area or cat):
+        seen_areas = Counter(primary_area(v)[0] for v in set(st.watched) | {v for v, r in st.ratings.items() if r > 0}
+                             if v in V)
+        far = []
+        for vid, _, followed in cands:
+            if followed or vid in used or tst["aff"].get(vid, 0) > BRANCH_MAX_AFFINITY:
+                continue
+            w = V[vid]["score"] ** 1.5 / (1 + seen_areas[primary_area(vid)[0]]) ** 2
+            far.append((rnd(seed + "br", vid) ** (1 / w), vid))
+        got = set()
+        for _, vid in sorted(far, reverse=True):
+            a, name = primary_area(vid)
+            if a in got or a == "-":
+                continue
+            got.add(a)
+            branch.append(vid)
+            reasons[vid] = {"kind": "branch", "text": f"Outside your usual: {name}", "area": a}
+            if len(branch) >= HOME_BRANCH:
+                break
 
-    def out(vid):
-        d = card(vid, st)
-        d["reason"] = reasons.get(vid)
-        return d
-    return {"lead": out(lead) if lead else None, "items": [out(v) for v in rest],
-            "pool": len(cands) + len(picks), "date": today.isoformat()}
+    def out(vids):
+        return [dict(card(v, st), reason=reasons.get(v)) for v in vids]
+    return {"continue": out(cont), "queue": out(queue), "picks": out(picks), "branch": out(branch),
+            "date": today.isoformat(), "today": today_tally(c)}
 
 
 # ---------------------------------------------------------------- API
@@ -582,7 +635,7 @@ def boot():
                 "total": len(VIDEOS), "watched": len(st.watched),
                 "settings": st.settings,
                 "follows": [{"name": n, "new": new_by[n]} for n in sorted(st.follows, key=str.lower)],
-                "playlists": pls, "today": date.today().isoformat()}
+                "playlists": pls, "today": date.today().isoformat(), "tally": today_tally(c)}
 
 
 @app.get("/api/mix")
@@ -735,6 +788,14 @@ def video(vid: str):
             raise HTTPException(404, "No such video")
         d = card(vid, st)
         d["in_playlists"] = [r[0] for r in c.execute("select playlist_id from items where vid=?", (vid,))]
+        d["today"] = today_tally(c)
+        for p in playlist_rows(c):  # the one thing offered when this video ends: what the user queued after it
+            if vid in p["vids"]:
+                nxt = next((x for x in p["vids"][p["vids"].index(vid) + 1:]
+                            if x not in st.watched and x not in st.hidden and st.available(x)), None)
+                if nxt:
+                    d["next_in"] = {"playlist": p["name"], "pid": p["id"], "vid": nxt, "title": card(nxt, st)["title"]}
+                    break
     d["url"] = f"https://www.youtube.com/watch?v={vid}"
     d["gone"] = bool(META.get(vid, {}).get("gone"))
     if vid in V:
@@ -757,9 +818,76 @@ def set_watched(vid: str, payload: dict = Body(default={})):
     with db() as c:
         if payload.get("watched", True):
             c.execute("insert or ignore into watched(vid, ts) values(?, ?)", (vid, time.time()))
+            c.execute("delete from progress where vid=?", (vid,))
         else:
             c.execute("delete from watched where vid=?", (vid,))
         return {"watched": c.execute("select count(*) from watched").fetchone()[0]}
+
+
+@app.post("/api/progress/{vid}")
+def set_progress(vid: str, payload: dict = Body(default={})):
+    """Called by the player every few seconds: where playback is (to resume, and for "Continue watching") and
+    how many seconds were actually played since the last call (for today's tally and the weekly review)."""
+    try:
+        pos, dur = float(payload.get("pos") or 0), float(payload.get("dur") or 0)
+        played = min(max(float(payload.get("played") or 0), 0.0), 120.0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "pos, dur and played must be numbers")
+    with db() as c:
+        if dur and 30 < pos < dur * 0.9:
+            c.execute("insert into progress(vid, pos, dur, ts) values(?,?,?,?) on conflict(vid) do update set "
+                      "pos=excluded.pos, dur=excluded.dur, ts=excluded.ts", (vid, pos, dur, time.time()))
+        else:
+            c.execute("delete from progress where vid=?", (vid,))
+        if played:
+            c.execute("insert into watchlog(day, vid, secs) values(?,?,?) on conflict(day, vid) do update set "
+                      "secs=secs+excluded.secs", (date.today().isoformat(), vid, played))
+        return today_tally(c)
+
+
+INTENTS = ("learn", "unwind", "one")
+
+
+@app.post("/api/intent")
+def set_intent(payload: dict = Body(default={})):
+    if payload.get("intent") not in INTENTS:
+        raise HTTPException(400, "unknown intent")
+    with db() as c:
+        c.execute("insert into intents(ts, intent) values(?, ?)", (time.time(), payload["intent"]))
+    return {"ok": True}
+
+
+@app.get("/api/review")
+def review():
+    """The last seven days, for the user to judge: time actually played, what was finished and whether it was
+    rated worth it, why they came, and where the time went. Compared with the seven days before."""
+    load_meta()
+    today = date.today()
+    days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    t0 = datetime.combine(today - timedelta(days=6), datetime.min.time()).timestamp()
+    with db() as c:
+        st = State(c)
+        log = [tuple(r) for r in c.execute("select day, vid, secs from watchlog where day >= ?",
+                                           ((today - timedelta(days=13)).isoformat(),))]
+        intents = Counter(r[0] for r in c.execute("select intent from intents where ts >= ?", (t0,)))
+    per_day, by_area, by_channel, prev = Counter(), Counter(), Counter(), 0.0
+    for day, vid, secs in log:
+        if day < days[0]:
+            prev += secs
+            continue
+        per_day[day] += secs
+        ch = V[vid]["channel"] if vid in V else (st.extra.get(vid) or {}).get("channel")
+        by_channel[ch or "Unknown"] += secs
+        by_area[primary_area(vid)[1] or "Other"] += secs
+    done = sorted(((v, t) for v, t in st.watched.items() if t >= t0 and (v in V or v in st.extra)), key=lambda x: -x[1])
+    rated = [st.ratings.get(v, 0) for v, _ in done]
+
+    def top(cn):
+        return [{"name": n, "secs": int(s)} for n, s in cn.most_common(5)]
+    return {"days": [{"day": d, "secs": int(per_day[d])} for d in days], "total": int(sum(per_day.values())),
+            "prev": int(prev), "finished": [card(v, st) for v, _ in done],
+            "worth": sum(r > 0 for r in rated), "not_worth": sum(r < 0 for r in rated), "unrated": sum(r == 0 for r in rated),
+            "intents": {k: intents[k] for k in INTENTS}, "areas": top(by_area), "channels": top(by_channel)}
 
 
 @app.post("/api/hide/{vid}")
