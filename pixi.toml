@@ -1,0 +1,14 @@
+[workspace]
+name = "personaltube"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.13.*"
+fastapi = "*"
+uvicorn = "*"
+numpy = ">=2.5.4,<3"
+
+[tasks]
+start = "python server.py"
+fetch-meta = "python fetch_youtube_meta.py"

@@ -1,0 +1,56 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+PersonalTube is a single-user, local-only web app: a daily mix of YouTube videos recommended on Hacker News, built on the HackerTube data export. `DATA.md` is the authoritative description of the dataset files (schemas, joins, caveats, licence); read it before touching anything that consumes them.
+
+## Commands
+
+Dependencies are managed with pixi (`pixi.toml`, top-level table `[workspace]`).
+
+```bash
+pixi run start        # serve the app at http://127.0.0.1:8765
+pixi run fetch-meta   # fetch/resume YouTube metadata into youtube_meta.jsonl (add --refresh to refetch all)
+```
+
+There are no tests, linter or build step. The frontend is plain files served from `static/`; reload the browser to see changes. The server reloads itself when a `.py` file changes (uvicorn `reload`, via watchfiles); it loads the dataset at import time, so each reload takes a few seconds.
+
+The YouTube API key is read from `YOUTUBE_API_KEY`, falling back to the login keyring through `secret-tool` (`ytkey.py` has the store command). The app runs without a key; only following channels by URL, refreshing uploads and importing playlists need one.
+
+## Architecture
+
+Three layers of data, all keyed by the 11-character YouTube id `vid`:
+
+1. **Read-only dataset** (`videos.jsonl`, `mentions.jsonl`, `related.jsonl`, `taxonomy.json`): loaded into module-level dicts at the top of `server.py` (`VIDEOS`, `V`, `MENTIONS`, `RELATED`, `BY_CHANNEL`, `BLOB`, `DUPES`). `embeddings.npy` is loaded with numpy as `EMB` (rows indexed by `EMB_ROW`) and used only for recommendations; search is still substring matching over `BLOB`.
+2. **YouTube metadata cache** (`youtube_meta.jsonl`, gitignored, written by `fetch_youtube_meta.py`): raw `videos.list` items. `load_meta()` reduces them to `META` (duration, channel id, publish date, views, or `{"gone": True}`) and re-reads the file whenever its mtime changes, so endpoints call it first and a running fetch shows up without a restart.
+3. **User state** (`state.db`, SQLite, gitignored): `watched`, `hidden`, `follows`, `playlists`/`items`, `kv`, `ratings` (1 liked, -1 disliked), `dearrow` and `ytsearch` (caches) and `extra`. `extra` holds videos from outside the HN dataset (uploads of followed channels with `upload=1`, imported playlist entries, and YouTube search results). The schema is `SCHEMA` in `server.py`, created with `create table if not exists`; new columns need an explicit `alter table` migration next to it, as done for `extra.views`.
+
+A video is therefore either an "HN video" (`vid in V`) or an "extra" (`vid in st.extra`), and code that handles a vid must cover both: `State` snapshots the user tables per request, `card(vid, st)` builds the JSON the frontend renders for either kind, and `passes()` applies the filters (extras have no topic, so they fail any area/category filter).
+
+Recurring exclusion rules for HN videos, applied separately in each endpoint: `DUPES` (re-uploads, by normalised title), `META[vid]["gone"]`, hidden, and for the mix also `shelf_life == "news"` and `hn.recommenders == 0`.
+
+`taste(st)` turns likes, dislikes and (weakly) watch history into a per-video affinity: the best rescaled embedding similarity to a liked video, a bonus for sharing HN recommenders (`RELATED`) or a channel with a like, and a penalty near dislikes. It is cached on the ratings/watched snapshot. `/api/foryou` ranks by it, and `build_mix()` multiplies its sampling weights by `exp(TASTE_PULL * affinity)`. Videos outside the HN data have no embedding, so they only count through their channel.
+
+The two on/off settings (`SETTINGS`: `hide_watched`, `dearrow`) live in `kv`, are read into `State` and reach the frontend as `B.settings`. `hide_watched` is applied in each list endpoint (not history, liked or playlists). With `dearrow` on, `card()` attaches cached DeArrow data as `da`; the frontend asks `/api/dearrow` for the videos on screen that lack it and patches titles and frames in, falling back to YouTube's automatic frame (`mq2.jpg`) when DeArrow has none or its thumbnail service fails.
+
+`build_mix()` is the core. It is deterministic for the day: every random draw is `rnd(seed, vid)`, a hash of (date, reshuffle count, vid), so state changes nudge the mix instead of redealing it. Keep new randomness on that scheme rather than using `random`. It fills 13 slots in three stages: next unwatched video of saved playlists, new uploads from followed channels, then score-weighted sampling with per-channel and per-area caps and weight boosts for followed channels and for taste.
+
+Subscription import (`/api/subs/preview`, `/api/subs/import`) reads a Google Takeout `subscriptions.csv` picked on the Following page; it needs no API key, and channels found in the HN data (by channel id, through `CHAN_ID`) are followed under their HN name so their picks stay linked.
+
+Playlists arrive three ways: made here, imported by URL (`/api/playlists/import`, needs the key; a channel URL in the same box lists the channel's public playlists through `/api/playlists/channel` and imports the ticked ones one by one), or from Google Takeout playlist CSVs picked on the Playlists page (`/api/playlists/takeout/preview` and `/import`, parsed by shape in `parse_takeout()`; same-named playlists are merged). Takeout needs no key, but videos outside the HN data then sit in `items` with no `extra` row ("pending") and stay invisible until a sync. `sync_playlist()` fills those in and, for playlists with a `yt_id`, three-way merges against `playlists.yt_seen` (the ids YouTube listed last time) so local additions and removals survive.
+
+A search (`#/browse?q=`) also shows a "From YouTube" section under the first page of HN results: `ytResults()` asks `/api/ytsearch` after the page is drawn. `youtube_search()` spends 100 quota units per new query, so answers are cached in `ytsearch` for a day (`YT_SEARCH_FRESH`); results are stored as extras so they open and play in the app like any other video, minus live streams and clips under `MIN_UPLOAD_SECONDS`. `forget_old_searches()` deletes searches after 30 days together with the extras only they brought in (in no playlist, never watched, rated or hidden).
+
+YouTube API calls go through `yt()`, which turns failures into `HTTPException`s whose `detail` the frontend shows in a toast. Upload refresh runs at most every 12 hours in a background thread triggered from `/api/mix`.
+
+**Frontend** (`static/app.js`, no framework, no build): a hash router (`route()`) dispatching to `page*` functions that fetch from `/api/*` and set `#main` via template strings. Everything interpolated into HTML must go through `esc()`. `B` is the boot payload from `/api/boot` (sidebar, counts, taxonomy); Filters (`len`, `type`, `sort`, and `area` on the mix and For You) are per page and live in the hash query string (`#/browse?len=long&sort=gems`): `filterParams()` reads them, `filterBar()` renders the Filters button, active chips and collapsed panel as plain links, and nothing about them is stored. Topics have their own pages, `#/a/<area>` and `#/c/<category>`, reached from `#/categories` and rendered by `pageBrowse()` like `#/browse` and `#/channel/<name>`. `localStorage` holds only theme, sidebar state and per-video resume positions. Playback uses the YouTube IFrame API on the `youtube-nocookie.com` host.
+
+## Constraints
+
+- **Do not change the port (8765) or bind address, and do not add a second way to play videos that avoids this origin.** All playback must happen in a page served from `http://127.0.0.1:8765`; tooling outside this repository depends on that exact origin.
+- YouTube API data must not be redistributed: `youtube_meta.jsonl` and `state.db` stay gitignored, and the key never goes in a file.
+- The dataset is ODC-By; keep the attribution in the sidebar footer of `static/index.html`.
+- The server uses only the standard library plus FastAPI/uvicorn and numpy; the fetch script is standard library only. Add new dependencies through `pixi.toml`.
+- DeArrow data is CC BY-NC-SA 4.0: keep its credit in the sidebar footer, look videos up by hash prefix, and never submit to its API.

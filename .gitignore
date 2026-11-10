@@ -1,0 +1,5 @@
+.pixi/
+state.db
+youtube_meta.jsonl
+.env
+__pycache__/
