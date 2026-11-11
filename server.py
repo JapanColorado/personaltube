@@ -963,7 +963,7 @@ def ytsearch(q: str = "", len: str = ""):
 
 
 @app.get("/api/video/{vid}")
-def video(vid: str):
+def video(vid: str, pl: int | None = None):
     load_meta()
     with db() as c:
         st = State(c)
@@ -972,13 +972,21 @@ def video(vid: str):
         d = card(vid, st)
         d["in_playlists"] = [r[0] for r in c.execute("select playlist_id from items where vid=?", (vid,))]
         d["today"] = today_tally(c)
-        for p in playlist_rows(c):  # the one thing offered when this video ends: what the user queued after it
-            if vid in p["vids"]:
-                nxt = next((x for x in p["vids"][p["vids"].index(vid) + 1:]
-                            if x not in st.watched and x not in st.hidden and st.available(x)), None)
-                if nxt:
-                    d["next_in"] = {"playlist": p["name"], "pid": p["id"], "vid": nxt, "title": card(nxt, st)["title"]}
-                    break
+        # The one thing offered when this video ends: what the user queued after it. Opened from a playlist
+        # (`pl`), that playlist and no other. Otherwise the playlists the user is working through up to this
+        # video (nothing unwatched before it) come first, then "Watch later", then the rest.
+        skip = lambda x: x in st.watched or x in st.hidden or not st.available(x)
+        pls = [p for p in playlist_rows(c) if vid in p["vids"]]
+        if pl is not None and any(p["id"] == pl for p in pls):
+            pls = [p for p in pls if p["id"] == pl]
+        else:
+            later = later_id(c)
+            pls.sort(key=lambda p: (not all(skip(x) for x in p["vids"][:p["vids"].index(vid)]), p["id"] != later))
+        for p in pls:
+            nxt = next((x for x in p["vids"][p["vids"].index(vid) + 1:] if not skip(x)), None)
+            if nxt:
+                d["next_in"] = {"playlist": p["name"], "pid": p["id"], "vid": nxt, "title": card(nxt, st)["title"]}
+                break
         if vid not in V:  # YouTube's own description, fetched the first time the video is opened (1 quota unit)
             r = c.execute("select text from descs where vid=?", (vid,)).fetchone()
             if r is None and os.environ.get("YOUTUBE_API_KEY"):

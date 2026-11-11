@@ -75,7 +75,12 @@ function thumb(v, q = 'mqdefault') {
 const timg = (v, q = 'mqdefault', lazy = true) => `<img ${lazy ? 'loading="lazy" ' : ''}src="${thumb(v, q)}" data-tv="${v.vid}" data-q="${q}" alt="">`;
 const ttl = v => (B.settings.dearrow && v.da && v.da.title) || v.title;
 const tip = v => ttl(v) === v.title ? v.title : 'Original title: ' + v.title;
-const vt = v => `<a class="vt" data-tt href="#/v/${v.vid}" title="${esc(tip(v))}">${esc(ttl(v))}</a>`;
+// A video's address; opened from a playlist it carries the playlist along, so the end screen offers that one's next
+const vhref = (v, play) => {
+  const pl = v.pl || (v.reason && v.reason.playlist), q = [play ? 'play=1' : '', pl ? 'pl=' + pl : ''].filter(Boolean).join('&');
+  return `#/v/${v.vid}${q ? '?' + q : ''}`;
+};
+const vt = v => `<a class="vt" data-tt href="${vhref(v)}" title="${esc(tip(v))}">${esc(ttl(v))}</a>`;
 const initial = name => esc((String(name || '?').trim()[0] || '?'));
 const seenTitle = on => on ? 'Unmark as watched' : 'Mark as watched';
 const seenLabel = on => on ? 'Watched' : 'Mark watched';
@@ -121,7 +126,7 @@ const fmtMin = s => { const m = Math.round(s / 60); return m >= 60 ? `${Math.flo
 // "Today: 2 videos, 47 min" from the server's tally of actual playback; empty until a minute has been played
 const tallyText = t => t && t.secs >= 60 ? `Today: ${t.videos} video${t.videos === 1 ? '' : 's'}, ${fmtMin(t.secs)}` : '';
 function thumbBox(v, q) {
-  return `<div class="thumb"><a href="#/v/${v.vid}" tabindex="-1" aria-hidden="true">${timg(v, q)}${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}${v.frac ? `<span class="tprog"><i style="width:${Math.round(v.frac * 100)}%"></i></span>` : ''}</a>
+  return `<div class="thumb"><a href="${vhref(v)}" tabindex="-1" aria-hidden="true">${timg(v, q)}${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}${v.frac ? `<span class="tprog"><i style="width:${Math.round(v.frac * 100)}%"></i></span>` : ''}</a>
     <button class="tbtn" data-act="seen" title="${seenTitle(v.watched)}" aria-label="${seenTitle(v.watched)}">${I.check}</button>
     <button class="tbtn later ${v.later ? 'on' : ''}" data-act="later" title="${laterTitle(v.later)}" aria-label="${laterTitle(v.later)}">${I.clock}</button></div>`;
 }
@@ -293,12 +298,13 @@ async function ytResults(q, len) {
   dearrow();
 }
 
-async function pageVideo(vid, autoplay) {
-  const v = await api('/video/' + vid);
+async function pageVideo(vid, autoplay, pl) {
+  const v = await api('/video/' + vid + (pl ? '?pl=' + enc(pl) : ''));
+  if (pl) v.pl = pl;
   CARDS[v.vid] = v;
   pageTitle = ttl(v);
   let h = `<div class="watch"><div class="primary ${v.watched ? 'seen' : ''}" data-vid="${v.vid}">
-    <div id="player" class="player"><a class="poster" href="#/v/${v.vid}?play=1" data-act="play" aria-label="Play video">
+    <div id="player" class="player"><a class="poster" href="${vhref(v, true)}" data-act="play" aria-label="Play video">
       ${timg(v, 'hqdefault', false)}<span class="play">${I.play}</span>${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}</a></div>
     <h1 data-tt title="${esc(tip(v))}">${esc(ttl(v))}</h1>
     ${v.gone ? '<p class="note err" style="margin:0 0 12px">YouTube says this video has been deleted or made private.</p>' : ''}
@@ -406,7 +412,7 @@ function stopScreen(vid, today) {
     <p class="ask">Was it worth your time?</p>
     <div class="actions"><button class="pill ${v.rating > 0 ? 'on' : ''}" data-act="like">${I.like} Worth it</button>
       <button class="pill ${v.rating < 0 ? 'on' : ''}" data-act="dislike">${I.dislike} Not really</button></div>
-    ${v.next_in && !one ? `<p>Next in ${esc(v.next_in.playlist)}: <a href="#/v/${v.next_in.vid}">${esc(v.next_in.title)}</a></p>` : ''}
+    ${v.next_in && !one ? `<p>Next in ${esc(v.next_in.playlist)}: <a href="${vhref({ vid: v.next_in.vid, pl: v.next_in.pid })}">${esc(v.next_in.title)}</a></p>` : ''}
     <div class="actions"><a class="pill solid" href="#/done">Done for now</a><a class="pill" href="#/">Back to home</a>
       ${!one && $('.watch .secondary') ? '<button class="pill" data-act="showrel">Show related</button>' : ''}
       <button class="pill" data-act="play">${I.refresh} Replay</button></div></div>`;
@@ -564,11 +570,12 @@ async function pagePlaylist(id) {
   if (!p.items.length) h += '<p class="empty">Empty. Use Save on any video to add it here.</p>';
   else h += `<ol class="plrows">${p.items.map((v, i) => {
     CARDS[v.vid] = v;
+    v.pl = p.id;
     const facts = factLine(v);
     return `<li class="row ${v.watched ? 'seen' : ''} ${v.vid === p.next ? 'nextup' : ''}" data-vid="${v.vid}" data-pl="${p.id}" draggable="true">
       <span class="grip" title="Drag to reorder" aria-hidden="true">${I.grip}</span>
       <span class="num">${i + 1}</span>
-      <div class="thumb"><a href="#/v/${v.vid}" tabindex="-1" aria-hidden="true">${timg(v)}${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}</a></div>
+      <div class="thumb"><a href="${vhref(v)}" tabindex="-1" aria-hidden="true">${timg(v)}${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}</a></div>
       <div class="text">${vt(v)}
         <div class="sub">${[chanLink(v), facts].filter(Boolean).join(' &middot; ')}</div>
         ${v.vid === p.next ? '<span class="via next">Up next</span>' : ''}</div>
@@ -757,7 +764,7 @@ async function route() {
     else if (name === 'channel') await pageBrowse(p, { channel: arg });
     else if (name === 'a') await pageBrowse(p, { area: arg });
     else if (name === 'c') await pageBrowse(p, { cat: arg });
-    else if (name === 'v') await pageVideo(arg, !!p.play);
+    else if (name === 'v') await pageVideo(arg, !!p.play, p.pl);
     else if (name === 'following') await pageFollowing(arg);
     else if (name === 'playlists') await pagePlaylists();
     else if (name === 'playlist') await pagePlaylist(arg);
@@ -977,7 +984,7 @@ document.addEventListener('click', async e => {
         e.stopPropagation();
         if (!pop.hidden && popAnchor === t) return closePopup();
         return menuPopup(vid, t, host);
-      case 'watch': location.hash = `#/v/${vid}?play=1`; return;
+      case 'watch': location.hash = vhref({ vid, pl: host && host.dataset.pl }, true); return;
       case 'play': e.preventDefault(); return startPlayer(vid);
       case 'intent': {
         api('/intent', { intent: t.dataset.kind }).catch(() => { /* only a count for the Review page */ });
