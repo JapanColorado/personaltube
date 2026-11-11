@@ -42,7 +42,7 @@ if __name__ == "__main__":
 DEFAULT_TYPES = {"talk", "lecture", "course", "tutorial", "explainer", "documentary",
                  "demo", "comedy", "music", "commentary", "other"}
 HOME_CONTINUE, HOME_PLAYLISTS, HOME_UPLOADS = 3, 3, 3   # home page: started videos, then "your queue"
-HOME_PICKS, HOME_BRANCH = 6, 3                          # then suggestions near your taste, and a few far from it
+HOME_PICKS, HOME_BRANCH = 7, 3                          # then suggestions near your taste, and a few far from it
 BRANCH_MAX_AFFINITY = 0.05  # "branch out" only offers videos the taste model does not already lean towards
 MIN_UPLOAD_SECONDS = 180  # skip Shorts / tiny clips from followed channels
 NEW_DAYS = 14             # uploads this recent get the NEW! badge
@@ -488,10 +488,11 @@ def primary_area(vid):
 
 
 def build_mix(c, area="", cat="", length="", types=None):
-    """The home page, in the order the user's own intentions come first: videos they started, their queue (next in
-    playlists, uploads from followed channels), a few suggestions near their taste, and a few deliberately far
-    from it. It is a fixed, small page, stable for the whole day: each video gets a fixed random draw from
-    (date, reshuffle count), so following a channel or watching something only nudges it instead of redealing."""
+    """The home page: one large pick and a single grid. The grid starts with what the user already chose (videos
+    they started, the next in their playlists, uploads from followed channels), then a few suggestions near their
+    taste and a few deliberately far from it. It is a fixed, small page, stable for the whole day: each video gets
+    a fixed random draw from (date, reshuffle count), so following a channel or watching something only nudges it
+    instead of redealing."""
     st = State(c)
     today = date.today()
     day0 = datetime.combine(today, datetime.min.time()).timestamp()
@@ -593,7 +594,10 @@ def build_mix(c, area="", cat="", length="", types=None):
 
     def out(vids):
         return [dict(card(v, st), reason=reasons.get(v)) for v in vids]
-    return {"continue": out(cont), "queue": out(queue), "picks": out(picks), "branch": out(branch),
+    for v in cont:
+        reasons.setdefault(v, {"kind": "continue", "text": "Continue watching"})
+    # One large pick, then a single grid: the user's own things first, then suggestions, then the far ones.
+    return {"lead": out(picks[:1]), "items": out(cont + queue + picks[1:] + branch),
             "date": today.isoformat(), "today": today_tally(c)}
 
 
