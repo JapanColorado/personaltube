@@ -768,18 +768,6 @@ def reshuffle():
     return {"ok": True}
 
 
-@app.get("/api/random")
-def random_video():
-    with db() as c:
-        st = State(c)
-    seed = str(time.time())
-    # score 0 (no HN recommenders) means zero sampling weight: never picked, and 1 / score would divide by zero
-    best = max((v for v in VIDEOS if v["score"] > 0 and v["vid"] not in st.watched and v["vid"] not in st.hidden
-                and v["vid"] not in DUPES and not META.get(v["vid"], {}).get("gone")),
-               key=lambda v: rnd(seed, v["vid"]) ** (1 / v["score"]), default=None)
-    return {"vid": best and best["vid"]}
-
-
 GEM_MIN_RECS, GEM_MAX_VIEWS = 2, 250_000  # a hidden gem: several HN recommenders, few YouTube views
 
 
@@ -1309,12 +1297,13 @@ def follow_url(payload: dict = Body(...)):
 
 def parse_subs(text):
     """(channel id, title) pairs from a Google Takeout subscriptions.csv. The header is localised, so rows are
-    read by shape: the cell that is a channel id, and the last other cell that is not a URL."""
+    read by shape: the cell that is a channel id, next to a URL holding it, and the last other cell that is not a
+    URL. (Other Takeout files, such as comments.csv, hold channel ids without the URL.)"""
     out = {}
     for row in csv.reader(io.StringIO(text.lstrip("﻿"))):
         cells = [x.strip() for x in row]
         cid = next((x for x in cells if re.fullmatch(r"UC[\w-]{22}", x)), None)
-        if cid:
+        if cid and any(re.match(r"https?://", x) and cid in x for x in cells):
             rest = [x for x in cells if x and x != cid and not re.match(r"https?://", x)]
             out.setdefault(cid, (rest[-1] if rest else cid)[:200])
     return list(out.items())
@@ -1326,41 +1315,16 @@ def subs_names(pairs):
     return [(cid, by_cid.get(cid) or title) for cid, title in pairs]
 
 
-@app.post("/api/subs/preview")
-def subs_preview(payload: dict = Body(...)):
-    text = payload.get("csv") or ""
-    if len(text) > 2_000_000:
-        raise HTTPException(400, "That file is too large to be a subscriptions.csv")
-    load_meta()
-    subs = subs_names(parse_subs(text))
-    if not subs:
-        raise HTTPException(400, "No channels found in that file. Pick subscriptions.csv from a Google Takeout export.")
-    with db() as c:
-        st = State(c)
+def follow_subs(c, subs):
+    """Follow the (channel id, name) pairs not followed yet; returns how many that was."""
+    st = State(c)
     ids = set(st.follows.values())
-    items = [{"id": cid, "name": n, "hn": sum(v not in DUPES for v in BY_CHANNEL.get(n, [])),
-              "followed": n in st.follows or cid in ids} for cid, n in subs]
-    items.sort(key=lambda i: (i["followed"], -i["hn"], i["name"].lower()))
-    return {"items": items}
-
-
-@app.post("/api/subs/import")
-def subs_import(payload: dict = Body(...)):
-    load_meta()
-    pairs = [(str(ch.get("id") or ""), str(ch.get("name") or "").strip()[:200])
-             for ch in payload.get("channels") or [] if isinstance(ch, dict)]
-    subs = subs_names([(cid, n) for cid, n in pairs if re.fullmatch(r"UC[\w-]{22}", cid) and n])
-    if not subs:
-        raise HTTPException(400, "No channels selected")
-    with db() as c:
-        st = State(c)
-        ids = set(st.follows.values())
-        new = {n: cid for cid, n in subs if n not in st.follows and cid not in ids}
-        c.executemany("insert or ignore into follows(channel, channel_id, ts) values(?,?,?)",
-                      [(n, cid, time.time()) for n, cid in new.items()])
-        if new:
-            kv_set(c, "last_refresh", 0)  # pick up their uploads on the next mix
-    return {"added": len(new), "already": len(subs) - len(new)}
+    new = {n: cid for cid, n in subs if n not in st.follows and cid not in ids}
+    c.executemany("insert or ignore into follows(channel, channel_id, ts) values(?,?,?)",
+                  [(n, cid, time.time()) for n, cid in new.items()])
+    if new:
+        kv_set(c, "last_refresh", 0)  # pick up their uploads on the next mix
+    return len(new)
 
 
 @app.get("/api/following")
@@ -1541,7 +1505,10 @@ def parse_takeout(files):
         except csv.Error:
             empty.append(fname)
             continue
-        vids = list(dict.fromkeys(r[0] for r in rows if r and YT_VID.fullmatch(r[0])))[:TAKEOUT_MAX_VIDEOS]
+        # a playlist row is the video id and when it was added; other Takeout CSVs that start with a video id
+        # (the metadata of your own uploads, for one) carry more columns
+        vids = list(dict.fromkeys(r[0] for r in rows if r and YT_VID.fullmatch(r[0])
+                                  and sum(bool(x) for x in r) <= 2))[:TAKEOUT_MAX_VIDEOS]
         own, index = None, False
         for r in rows:
             pl = next((x for x in r if YT_PLAYLIST.fullmatch(x)), None)
@@ -1571,67 +1538,47 @@ def takeout_match(c, p):
     return r[0] if r else None
 
 
-@app.post("/api/playlists/takeout/preview")
-def takeout_preview(payload: dict = Body(...)):
-    files = [f for f in payload.get("files") or [] if isinstance(f, dict)]
-    if sum(len(str(f.get("csv") or "")) for f in files) > 20_000_000:
-        raise HTTPException(400, "Those files are too large to be Takeout playlists")
-    lists, empty = parse_takeout(files)
-    if not lists:
-        raise HTTPException(400, "No videos found in those files. Pick the CSV files from the "
-                                 "\"YouTube and YouTube Music/playlists\" folder of a Google Takeout export.")
-    with db() as c:
-        st = State(c)
-        for p in lists:
-            pid = takeout_match(c, p)
-            have = {r[0] for r in c.execute("select vid from items where playlist_id=?", (pid,))} if pid else set()
-            p.update(total=len(p["vids"]), hn=sum(v in V for v in p["vids"]),
-                     unknown=sum(v not in V and v not in st.extra for v in p["vids"]),
-                     existing=pid, new=sum(v not in have for v in p["vids"]))
-    lists.sort(key=lambda p: (p["existing"] is not None and not p["new"], p["name"].lower()))
-    return {"items": lists, "empty": empty}
+def playlists_preview(c, st, lists):
+    """What importing each Takeout playlist would do, for the summary."""
+    out = []
+    for i, p in enumerate(lists):
+        pid = takeout_match(c, p)
+        have = {r[0] for r in c.execute("select vid from items where playlist_id=?", (pid,))} if pid else set()
+        out.append({"i": i, "name": p["name"], "total": len(p["vids"]), "hn": sum(v in V for v in p["vids"]),
+                    "unknown": sum(v not in V and v not in st.extra for v in p["vids"]),
+                    "existing": pid, "new": sum(v not in have for v in p["vids"])})
+    out.sort(key=lambda p: (p["existing"] is not None and not p["new"], p["name"].lower()))
+    return out
 
 
-@app.post("/api/playlists/takeout/import")
-def takeout_import(payload: dict = Body(...)):
-    lists = []
-    for p in payload.get("playlists") or []:
-        if not isinstance(p, dict) or not isinstance(p.get("vids"), list):
-            continue
-        vids = list(dict.fromkeys(v for v in p["vids"] if isinstance(v, str) and YT_VID.fullmatch(v)))
-        yt_id = p.get("yt_id") if isinstance(p.get("yt_id"), str) and YT_PLAYLIST.fullmatch(p["yt_id"]) else None
-        name = str(p.get("name") or "").strip()[:120]
-        if vids and name:
-            lists.append({"name": name, "yt_id": yt_id, "vids": vids[:TAKEOUT_MAX_VIDEOS]})
-    if not lists:
-        raise HTTPException(400, "No playlists selected")
+def import_playlists(c, lists):
+    """Add Takeout playlists, merging each into the playlist takeout_match() finds."""
     has_key = bool(os.environ.get("YOUTUBE_API_KEY"))
     out = {"created": 0, "updated": 0, "videos": 0, "unavailable": 0, "pending": 0, "ids": []}
-    with db() as c:
-        # Without a key the videos from outside the HN data are stored anyway; they stay out of sight until
-        # a later sync (playlist page) fetches their details.
-        dead = learn_videos(c, [v for p in lists for v in p["vids"]]) if has_key else set()
-        known = {r[0] for r in c.execute("select vid from extra")}
-        for p in lists:
-            vids = [v for v in p["vids"] if v not in dead]
-            out["unavailable"] += len(p["vids"]) - len(vids)
-            pid = takeout_match(c, p)
-            if pid:
-                order = [r[0] for r in c.execute("select vid from items where playlist_id=? order by pos", (pid,))]
-                add = [v for v in vids if v not in set(order)]
-                if p["yt_id"]:
-                    c.execute("update playlists set yt_id=? where id=? and yt_id is null", (p["yt_id"], pid))
-                out["updated"] += bool(add)
-            else:
-                order, add = [], vids
-                pid = c.execute("insert into playlists(name, yt_id, yt_seen, ts) values(?,?,?,?)",
-                                (p["name"], p["yt_id"], json.dumps(p["vids"]) if p["yt_id"] else None,
-                                 time.time())).lastrowid
-                out["created"] += 1
-            set_items(c, pid, order + add)
-            out["videos"] += len(add)
-            out["pending"] += sum(v not in V and v not in known for v in add)
-            out["ids"].append(pid)
+    # Without a key the videos from outside the HN data are stored anyway; they stay out of sight until
+    # a later sync (playlist page) fetches their details.
+    dead = learn_videos(c, [v for p in lists for v in p["vids"]]) if has_key else set()
+    known = {r[0] for r in c.execute("select vid from extra")}
+    for p in lists:
+        vids = [v for v in p["vids"] if v not in dead]
+        out["unavailable"] += len(p["vids"]) - len(vids)
+        pid = takeout_match(c, p)
+        if pid:
+            order = [r[0] for r in c.execute("select vid from items where playlist_id=? order by pos", (pid,))]
+            add = [v for v in vids if v not in set(order)]
+            if p["yt_id"]:
+                c.execute("update playlists set yt_id=? where id=? and yt_id is null", (p["yt_id"], pid))
+            out["updated"] += bool(add)
+        else:
+            order, add = [], vids
+            pid = c.execute("insert into playlists(name, yt_id, yt_seen, ts) values(?,?,?,?)",
+                            (p["name"], p["yt_id"], json.dumps(p["vids"]) if p["yt_id"] else None,
+                             time.time())).lastrowid
+            out["created"] += 1
+        set_items(c, pid, order + add)
+        out["videos"] += len(add)
+        out["pending"] += sum(v not in V and v not in known for v in add)
+        out["ids"].append(pid)
     return out
 
 
@@ -1709,12 +1656,20 @@ def set_later(vid: str, payload: dict = Body(default={})):
     return {"on": on, "id": pid}
 
 
-# ---- Takeout: watch history and liked videos, to give recommendations something to go on
+# ---- Google Takeout: one export, sorted out by what each file is
 #
-# "YouTube and YouTube Music/history/watch-history.json" (or .html, Takeout's default format) lists every video
-# opened. Imported videos count as watched; rows get src='takeout' so the whole import can be taken back.
+# The frontend sends the files of a "YouTube and YouTube Music" export one at a time to /api/takeout/file
+# (read out of the .zip in the browser, or picked as a folder), all under one token; /summary says what they hold
+# and /import brings in the parts the user kept ticked. File names and headers are localised, so files are told
+# apart by shape:
+# - watch history (history/watch-history.json or .html): every video opened. Imported videos count as watched;
+#   rows get src='takeout' so this can be taken back.
+# - subscriptions.csv: channels to follow.
+# - playlist CSVs (and playlists.csv, the index with their ids and titles); one whose name starts with "Liked"
+#   turns into likes instead, also src='takeout'.
 
-_takeout_history = {}  # token -> parsed rows of the file last previewed (kept in memory until imported)
+_takeout = {}  # token -> what the files sent so far hold; only the latest token is kept, in memory
+TAKEOUT_SKIP = re.compile(r"search|comment|chat", re.I)  # json/html files that link to videos but are no history
 
 
 def parse_when(s):
@@ -1767,62 +1722,116 @@ def parse_history(data):
     return [(v, t if t else float(len(out) - i)) for i, (v, t) in enumerate(out)], entries
 
 
-@app.post("/api/takeout/history/preview")
-async def takeout_history_preview(request: Request):
-    """Takes the file itself as the request body (these files run to tens of megabytes)."""
+def is_likes(p):
+    return loose(p["name"]).startswith("liked")
+
+
+@app.post("/api/takeout/file")
+async def takeout_file(request: Request, token: str, name: str):
+    """One file of an export, as the request body (watch histories run to tens of megabytes)."""
     data = await request.body()
     if len(data) > 300_000_000:
-        raise HTTPException(400, "That file is too large to be a watch history")
-    rows, entries = parse_history(data)
-    if not rows:
-        raise HTTPException(400, "No videos found in that file. Pick watch-history.json or watch-history.html from the "
-                                 "\"YouTube and YouTube Music/history\" folder of a Google Takeout export.")
+        raise HTTPException(400, f"{name} is too large to be part of a YouTube export")
+    for k in [k for k in _takeout if k != token]:
+        del _takeout[k]
+    t = _takeout.setdefault(token, {"history": {}, "subs": {}, "csv": []})
+    low, kind = name.lower(), None
+    if low.endswith(".csv"):
+        text = data.decode("utf-8", "replace")
+        subs = parse_subs(text)
+        if subs:
+            t["subs"].update(subs)
+            kind = "subs"
+        else:
+            t["csv"].append({"name": name, "csv": text})  # playlists are read together: the index names them
+            kind = "csv"
+    elif low.endswith((".json", ".html", ".htm")) and not TAKEOUT_SKIP.search(low.rsplit("/", 1)[-1]):
+        try:
+            rows, _ = parse_history(data)
+        except HTTPException:
+            rows = []
+        for v, ts in rows:
+            t["history"].setdefault(v, ts)
+        kind = "history" if rows else None
+    return {"kind": kind}
+
+
+def takeout_parts(t):
+    """The playlists and the liked videos in the CSVs sent."""
+    lists, _ = parse_takeout(t["csv"])
+    likes = list(dict.fromkeys(v for p in lists if is_likes(p) for v in p["vids"]))
+    return [p for p in lists if not is_likes(p)], likes
+
+
+def takeout_get(token):
+    t = _takeout.get(token)
+    if t is None:
+        raise HTTPException(400, "Pick the files again: the app restarted since they were read.")
+    return t
+
+
+@app.get("/api/takeout/summary")
+def takeout_summary(token: str):
+    load_meta()
+    t = takeout_get(token)
+    lists, likes = takeout_parts(t)
+    hist = t["history"]
+    if not (hist or likes or t["subs"] or lists):
+        raise HTTPException(400, "Nothing from YouTube in there. Pick the Takeout .zip, its unzipped folder, "
+                                 "or files from its \"YouTube and YouTube Music\" folder.")
+    out = {}
     with db() as c:
         st = State(c)
-    token = hashlib.blake2b(data, digest_size=8).hexdigest()
-    _takeout_history.clear()
-    _takeout_history[token] = rows
-    dated = sorted(t for _, t in rows if t > 86400 * 365)
-    day = lambda t: datetime.fromtimestamp(t).strftime("%Y-%m-%d")
-    return {"token": token, "entries": entries, "videos": len(rows),
-            "library": sum(v in V for v, _ in rows), "known": sum(v in V or v in st.extra for v, _ in rows),
-            "new": sum(v not in st.watched for v, _ in rows),
-            "new_known": sum(v not in st.watched and (v in V or v in st.extra) for v, _ in rows),
-            "first": day(dated[0]) if dated else None, "last": day(dated[-1]) if dated else None}
+        if hist:
+            dated = sorted(ts for ts in hist.values() if ts > 86400 * 365)
+            day = lambda ts: datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            out["history"] = {"videos": len(hist), "library": sum(v in V for v in hist),
+                              "new": sum(v not in st.watched for v in hist),
+                              "first": day(dated[0]) if dated else None, "last": day(dated[-1]) if dated else None}
+        if likes:
+            new = [v for v in likes if v not in st.ratings]
+            out["likes"] = {"videos": len(likes), "new": len(new), "library": sum(v in V for v in new)}
+        if t["subs"]:
+            ids = set(st.follows.values())
+            items = [{"id": cid, "name": n, "hn": sum(v not in DUPES for v in BY_CHANNEL.get(n, [])),
+                      "followed": n in st.follows or cid in ids} for cid, n in subs_names(list(t["subs"].items()))]
+            items.sort(key=lambda i: (i["followed"], -i["hn"], i["name"].lower()))
+            out["subs"] = items
+        if lists:
+            out["playlists"] = playlists_preview(c, st, lists)
+    return out
 
 
-@app.post("/api/takeout/history/import")
-def takeout_history_import(payload: dict = Body(...)):
-    rows = _takeout_history.pop(payload.get("token"), None)
-    if rows is None:
-        raise HTTPException(400, "Pick the file again: the app restarted since it was read.")
+@app.post("/api/takeout/import")
+def takeout_import(payload: dict = Body(...)):
+    """Bring in the parts asked for: history and likes (true/false), subs (channel ids), playlists (indexes)."""
+    load_meta()
+    token = payload.get("token")
+    t = takeout_get(token)
+    lists, likes = takeout_parts(t)
+    out = {}
     with db() as c:
-        before = c.execute("select count(*) from watched").fetchone()[0]
-        c.executemany("insert or ignore into watched(vid, ts, src) values(?,?,'takeout')", rows)
-        c.execute("delete from progress where vid in (select vid from watched)")
-        return {"added": c.execute("select count(*) from watched").fetchone()[0] - before}
-
-
-@app.post("/api/takeout/likes")
-def takeout_likes(payload: dict = Body(...)):
-    """A playlist CSV from Takeout (the "Liked videos" one) whose videos become likes. Videos that already have a
-    rating keep it. Without "apply" it only counts."""
-    text = str(payload.get("csv") or "")
-    if len(text) > 20_000_000:
-        raise HTTPException(400, "That file is too large to be a playlist")
-    lists, _ = parse_takeout([{"name": "likes.csv", "csv": text}])
-    vids = lists[0]["vids"] if lists else []
-    if not vids:
-        raise HTTPException(400, "No videos found in that file. Pick the CSV of your liked videos from a Takeout export.")
-    with db() as c:
-        st = State(c)
-        new = [v for v in vids if v not in st.ratings]
-        if payload.get("apply"):
+        if payload.get("history") and t["history"]:
+            before = c.execute("select count(*) from watched").fetchone()[0]
+            c.executemany("insert or ignore into watched(vid, ts, src) values(?,?,'takeout')", t["history"].items())
+            c.execute("delete from progress where vid in (select vid from watched)")
+            out["watched"] = c.execute("select count(*) from watched").fetchone()[0] - before
+        if payload.get("likes") and likes:
             now = time.time()
+            n = c.total_changes
             c.executemany("insert or ignore into ratings(vid, rating, ts, src) values(?,1,?,'takeout')",
-                          [(v, now - i) for i, v in enumerate(new)])
-    return {"videos": len(vids), "new": len(new), "library": sum(v in V for v in new),
-            "known": sum(v in V or v in st.extra for v in new)}
+                          [(v, now - i) for i, v in enumerate(likes)])
+            out["liked"] = c.total_changes - n
+        want = set(payload.get("subs") or [])
+        subs = [(cid, n) for cid, n in subs_names(list(t["subs"].items())) if cid in want]
+        if subs:
+            out["followed"] = follow_subs(c, subs)
+        pick = {i for i in payload.get("playlists") or [] if isinstance(i, int)}
+        chosen = [p for i, p in enumerate(lists) if i in pick]
+        if chosen:
+            out["playlists"] = import_playlists(c, chosen)
+    _takeout.pop(token, None)
+    return out
 
 
 @app.post("/api/takeout/forget")

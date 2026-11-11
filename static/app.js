@@ -256,13 +256,13 @@ async function pageBrowse(p, o = {}) {
       ${followBtn(channel, d.channel.followed)}${d.channel.followed ? quietBtn(channel, d.channel.quiet, true) : ''}
       <a class="pill" href="https://www.youtube.com/results?search_query=${enc(channel)}" target="_blank" rel="noopener">${I.out} Find on YouTube</a>`;
   } else if (area) {
-    h += `<div class="pagehead"><div class="crumb"><a href="#/categories">Categories</a>${cat ? ` &rsaquo; <a href="#/a/${area.id}">${esc(area.name)}</a>` : ''}</div></div>`;
+    h += `<div class="pagehead"><div class="crumb"><a href="#/explore">Explore</a>${cat ? ` &rsaquo; <a href="#/a/${area.id}">${esc(area.name)}</a>` : ''}</div></div>`;
     pageTitle = cat ? cat.name : area.name;
     head = `<h2>${esc(cat ? cat.name : area.name)}</h2>${cat ? topicCtl(cat.id, cat.w, area.w) : topicCtl(area.id, area.w)}`;
     if (!cat) after = `<div class="catwrap">${area.categories.map(c => `<a class="chip" href="#/c/${c.id}">${esc(c.name)}</a>`).join('')}</div>`;
   } else {
-    pageTitle = q || 'Browse';
-    head = `<h2>${q ? `Results for &ldquo;${esc(d.corrected || q)}&rdquo;` : 'Browse'}</h2>`;
+    pageTitle = q || 'All videos';
+    head = `<h2>${q ? `Results for &ldquo;${esc(d.corrected || q)}&rdquo;` : 'All videos'}</h2>`;
   }
   const to = n => href(base, { q, ...f, page: n });
   const pager = d.pages > 1 ? `<div class="pager">${page > 1 ? `<a class="pill" href="${to(page - 1)}">Previous</a>` : ''}
@@ -271,12 +271,10 @@ async function pageBrowse(p, o = {}) {
     + (d.corrected ? `<p class="note">Nothing matches &ldquo;${esc(q)}&rdquo;, so these are the results for &ldquo;${esc(d.corrected)}&rdquo;.</p>` : '')
     + (f.sort === 'gems' ? '<p class="note">Hidden gems: recommended by several people, yet little watched on YouTube.</p>' : '')
     + (q && !d.items.length ? '<p class="empty">Nothing in the library or among your own videos matches that.</p>' : grid(d.items)) + pager;
-  const yts = q && page === 1;   // general YouTube results under the first page of a search
-  if (yts) h += `<section id="ytres" class="ytres"><h3>From YouTube</h3>${B.has_key
-    ? '<p class="empty">Searching YouTube…</p>'
-    : '<p class="note">Add a YouTube API key to see results from the rest of YouTube here. See <a href="#/setup">Settings</a>.</p>'}</section>`;
+  const yts = q && page === 1 && B.has_key;   // general YouTube results under the first page of a search
+  if (yts) h += '<section id="ytres" class="ytres"><h3>From YouTube</h3><p class="empty">Searching YouTube…</p></section>';
   main(h);
-  if (yts && B.has_key) ytResults(q, f.len);
+  if (yts) ytResults(q, f.len);
 }
 // Fills the "From YouTube" section after the library results are on screen; does nothing if the page changed meanwhile.
 async function ytResults(q, len) {
@@ -498,18 +496,15 @@ function applyChanFilter() {
 
 async function pageFollowing(tab) {
   const d = await api('/following');
-  const noKey = B.has_key ? '' : 'disabled title="Needs a YouTube API key"';
   const chans = tab === 'channels';
   const total = d.channels.length;
   let h = `<div class="pagehead"><h2>Following</h2></div>
     <div class="tabs"><a href="#/following" class="${chans ? '' : 'on'}">Videos</a><a href="#/following/channels" class="${chans ? 'on' : ''}">Channels <span class="muted">${total}</span></a>
-      <span class="grow"></span>${chans ? '' : `<button class="pill" data-act="refresh" ${noKey}>${I.refresh} Check for new uploads</button>`}</div>`;
-  if (!B.has_key) h += '<p class="note">No YouTube API key in this session, so new uploads can\'t be fetched. Library videos from followed channels still work. See <a href="#/setup">Settings</a>.</p>';
+      <span class="grow"></span>${chans || !B.has_key ? '' : `<button class="pill" data-act="refresh">${I.refresh} Check for new uploads</button>`}</div>`;
   if (chans) {
     h += `<div class="forms">
       <form id="chanfind"><input class="field" type="text" name="q" placeholder="Find a channel in the library" aria-label="Find a channel"><button class="pill">Find</button></form>
-      <form id="chanurl"><input class="field" type="text" name="url" placeholder="Or any @handle / channel URL" aria-label="Channel URL or handle" ${B.has_key ? '' : 'disabled'}><button class="pill" ${noKey}>Follow</button></form>
-      <label class="pill" title="Pick subscriptions.csv from a Google Takeout export of YouTube">Import subscriptions<input type="file" id="subsfile" accept=".csv,text/csv" hidden></label>
+      ${B.has_key ? '<form id="chanurl"><input class="field" type="text" name="url" placeholder="Or any @handle / channel URL" aria-label="Channel URL or handle"><button class="pill">Follow</button></form>' : ''}
     </div><div id="chanresults"></div>`;
     if (total) {
       const list = [...d.channels].sort((x, y) => y.new - x.new);   // stable: alphabetical within equal counts
@@ -523,14 +518,14 @@ async function pageFollowing(tab) {
           <button class="unf" data-follow="${esc(c.name)}" data-on="1" title="Unfollow ${esc(c.name)}" aria-label="Unfollow ${esc(c.name)}">${I.close}</button></div>`).join('')}</div>
         <p class="empty" id="channone" hidden>No followed channel matches that.</p>`;
     } else {
-      h += '<p class="empty">You are not following anyone yet. Try the search box, or the Follow button on any video.</p>';
+      h += '<p class="empty">You are not following anyone yet. Find a channel above, use the Follow button on any video, or bring your YouTube subscriptions in from <a class="link" href="#/setup">Settings</a>.</p>';
     }
   } else {
     if (d.uploads.length) h += '<h3 class="sechead">Uploads</h3>' + grid(d.uploads);
     if (d.picks.length) h += '<h3 class="sechead">From the library</h3>' + grid(d.picks);
     if (!d.uploads.length && !d.picks.length) h += total
       ? '<p class="empty">Nothing unwatched from the channels you follow right now.</p>'
-      : '<p class="empty">You are not following anyone yet. Add channels on the <a class="link" href="#/following/channels">Channels</a> tab, or use the Follow button on any video.</p>';
+      : '<p class="empty">You are not following anyone yet. Add channels on the <a class="link" href="#/following/channels">Channels</a> tab, use the Follow button on any video, or bring your YouTube subscriptions in from <a class="link" href="#/setup">Settings</a>.</p>';
   }
   main(h);
   if (chans) applyChanFilter();
@@ -538,14 +533,11 @@ async function pageFollowing(tab) {
 
 async function pagePlaylists() {
   const d = await api('/playlists');
-  const noKey = B.has_key ? '' : 'disabled title="Needs a YouTube API key"';
   let h = `<div class="pagehead"><h2>Playlists</h2></div>
     <div class="forms">
       <form id="plnew"><input class="field" type="text" name="name" placeholder="New playlist name" aria-label="New playlist name"><button class="pill">Create</button></form>
-      <form id="plimport"><input class="field" type="text" name="url" placeholder="YouTube playlist or channel URL" aria-label="YouTube playlist URL, or a channel URL or @handle to pick from its playlists" title="A playlist URL imports that playlist. A channel URL or @handle lists the channel's public playlists to pick from." ${B.has_key ? '' : 'disabled'}><button class="pill" ${noKey}>Import</button></form>
-      <label class="pill" title="Pick the CSV files in the &quot;YouTube and YouTube Music/playlists&quot; folder of a Google Takeout export (select them all at once)">Import from Takeout<input type="file" id="plfiles" accept=".csv,text/csv" multiple hidden></label>
+      ${B.has_key ? `<form id="plimport"><input class="field" type="text" name="url" placeholder="YouTube playlist or channel URL" aria-label="YouTube playlist URL, or a channel URL or @handle to pick from its playlists" title="A playlist URL imports that playlist. A channel URL or @handle lists the channel's public playlists to pick from."><button class="pill">Import</button></form>` : ''}
     </div><div id="plresults"></div>`;
-  if (!B.has_key) h += '<p class="note">Importing playlists by playlist or channel URL needs a YouTube API key in this session, and so do the details of Takeout videos from outside the library. See <a href="#/setup">Settings</a>.</p>';
   if (d.items.length) {
     h += `<div class="pgrid">${d.items.map(p => `<a class="plcard" href="#/playlist/${p.id}" ${p.next ? `data-vid="${(CARDS[p.next.vid] = p.next).vid}"` : ''}>
       <div class="thumb ${p.next ? '' : 'blank'}">${p.next ? timg(p.next) : I.list}<span class="plcount">${p.done}/${p.total} watched</span></div>
@@ -553,7 +545,7 @@ async function pagePlaylists() {
       <div class="vt">${esc(p.name)}</div>
       <div class="sub">${p.next ? 'Up next: ' + esc(ttl(p.next)) : (p.total ? 'All done' : p.pending ? 'Waiting for video details' : 'Empty: use Save on any video')}${p.yt_id ? ' &middot; imported' : ''}</div></a>`).join('')}</div>`;
   } else {
-    h += '<p class="empty">No playlists yet. Create one here, then use Save on any video.</p>';
+    h += '<p class="empty">No playlists yet. Create one here and use Save on any video, or bring your YouTube playlists in from <a class="link" href="#/setup">Settings</a>.</p>';
   }
   main(h);
 }
@@ -564,7 +556,7 @@ async function pagePlaylist(id) {
   let h = `<div class="pagehead headrow"><div><h2>${esc(p.name)}</h2><p class="sub">${p.done} of ${p.items.length} watched</p></div>
     <span class="progress"><i style="width:${p.items.length ? 100 * p.done / p.items.length : 0}%"></i></span><span style="flex:1"></span>
     ${p.next && p.items.length > 12 ? `<button class="pill" data-act="jumpnext">${I.down} Up next</button>` : ''}
-    ${p.yt_id ? `<button class="pill" data-act="plsync" data-id="${p.id}" ${B.has_key ? 'title="Add what is new on YouTube, drop what was removed there; your own changes here are kept"' : 'disabled title="Needs a YouTube API key"'}>${I.refresh} Sync with YouTube</button>
+    ${p.yt_id ? `${B.has_key ? `<button class="pill" data-act="plsync" data-id="${p.id}" title="Add what is new on YouTube, drop what was removed there; your own changes here are kept">${I.refresh} Sync with YouTube</button>` : ''}
       <a class="pill" href="https://www.youtube.com/playlist?list=${esc(p.yt_id)}" target="_blank" rel="noopener">${I.out} On YouTube</a>` : ''}
     <button class="pill danger" data-act="delpl" data-id="${p.id}">${I.trash} Delete playlist</button></div>`;
   if (p.pending) h += `<p class="note">${p.pending} video${p.pending === 1 ? ' is' : 's are'} not shown: imported without a YouTube API key, so there are no titles for them yet. ${B.has_key
@@ -600,17 +592,27 @@ function dayLabel(when) {
   if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'long' });
   return d.toLocaleDateString(undefined, d.getFullYear() === now.getFullYear() ? { month: 'long' } : { month: 'long', year: 'numeric' });
 }
-async function pageHistory() {
-  const d = await api('/history');
-  const groups = [];                // consecutive videos under the same label; the list comes newest first
-  for (const v of d.items) {
-    const label = dayLabel(v.when);
-    if (!groups.length || groups[groups.length - 1][0] !== label) groups.push([label, []]);
-    groups[groups.length - 1][1].push(v);
+async function pageLibrary(tab) {
+  const liked = tab === 'liked';
+  const d = await api(liked ? '/liked' : '/history');
+  pageTitle = liked ? 'Liked' : 'History';
+  let h = `<div class="pagehead"><h2>Library</h2></div>
+    <div class="tabs"><a href="#/library" class="${liked ? '' : 'on'}">History</a><a href="#/library/liked" class="${liked ? 'on' : ''}">Liked</a></div>`;
+  if (liked) {
+    h += d.items.length ? grid(d.items) : '<p class="empty">No likes yet. Use the thumbs-up on a video\'s page, or the three-dot menu on any card.</p>';
+    if (d.disliked.length) h += `<h3 class="sechead">Disliked</h3><div class="rows">${d.disliked.map(v => `<div class="r plain" data-vid="${v.vid}">
+      <div class="name"><a href="#/v/${v.vid}">${esc(v.title)}</a></div><button class="pill" data-act="unrate">Remove dislike</button></div>`).join('')}</div>`;
+  } else {
+    const groups = [];                // consecutive videos under the same label; the list comes newest first
+    for (const v of d.items) {
+      const label = dayLabel(v.when);
+      if (!groups.length || groups[groups.length - 1][0] !== label) groups.push([label, []]);
+      groups[groups.length - 1][1].push(v);
+    }
+    h += groups.map(([label, items]) => `<h3 class="sechead">${esc(label)}</h3>${grid(items)}`).join('') || '<p class="empty">Nothing watched yet.</p>';
+    if (d.hidden.length) h += `<h3 class="sechead">Hidden videos</h3><div class="rows">${d.hidden.map(v => `<div class="r plain" data-vid="${v.vid}">
+      <div class="name">${esc(v.title)}</div><button class="pill" data-act="unhide">Bring back</button></div>`).join('')}</div>`;
   }
-  let h = `<div class="pagehead"><h2>History</h2></div>` + (groups.map(([label, items]) => `<h3 class="sechead">${esc(label)}</h3>${grid(items)}`).join('') || '<p class="empty">Nothing watched yet.</p>');
-  if (d.hidden.length) h += `<h3 class="sechead">Hidden videos</h3><div class="rows">${d.hidden.map(v => `<div class="r plain" data-vid="${v.vid}">
-    <div class="name">${esc(v.title)}</div><button class="pill" data-act="unhide">Bring back</button></div>`).join('')}</div>`;
   main(h);
 }
 
@@ -619,30 +621,19 @@ async function pageForYou(p) {
   const d = await api('/foryou?' + qs(f));
   let h = filterBar('#/foryou', {}, f, d.items.length ? `<span class="muted">from ${d.likes} like${d.likes === 1 ? '' : 's'}${d.topics ? ', your topics' : ''} and your history</span>` : '', '<h2>For You</h2>');
   if (d.items.length) h += grid(d.items);
-  else if (!d.likes && !d.watched && !d.topics) h += `<p class="empty">Nothing to go on yet. Like a few videos (the thumbs-up on a video's page, or the three-dot menu on any card), mark the topics you want more of on <a class="link" href="#/categories">Categories</a>, or bring your YouTube history in from <a class="link" href="#/setup">Settings</a>.</p>`;
-  else h += '<p class="empty">No close matches. Like a few more videos, ask for more of a topic on <a class="link" href="#/categories">Categories</a>, or remove a filter.</p>';
-  main(h);
-}
-
-async function pageLiked() {
-  const d = await api('/liked');
-  let h = `<div class="pagehead"><h2>Liked</h2></div>` + (d.items.length ? grid(d.items) : '<p class="empty">No likes yet. Use the thumbs-up on a video\'s page, or the three-dot menu on any card.</p>');
-  if (d.disliked.length) h += `<h3 class="sechead">Disliked</h3><div class="rows">${d.disliked.map(v => `<div class="r plain" data-vid="${v.vid}">
-    <div class="name"><a href="#/v/${v.vid}">${esc(v.title)}</a></div><button class="pill" data-act="unrate">Remove dislike</button></div>`).join('')}</div>`;
+  else if (!d.likes && !d.watched && !d.topics) h += `<p class="empty">Nothing to go on yet. Like a few videos (the thumbs-up on a video's page, or the three-dot menu on any card), mark the topics you want more of on <a class="link" href="#/explore">Explore</a>, or bring your YouTube history in from <a class="link" href="#/setup">Settings</a>.</p>`;
+  else h += '<p class="empty">No close matches. Like a few more videos, ask for more of a topic on <a class="link" href="#/explore">Explore</a>, or remove a filter.</p>';
   main(h);
 }
 
 // every topic area with its categories, plus quick ways into the whole collection
-function pageCategories() {
-  const meta = (to, label) => B.has_meta ? `<a class="pill" href="${to}">${label}</a>`
-    : `<button class="pill" disabled title="Needs data from YouTube; see Settings">${label}</button>`;
+function pageExplore() {
   main(`<div class="explore">
-    <div class="pagehead"><h2>Categories</h2></div>
+    <div class="pagehead"><h2>Explore</h2></div>
     <div class="quick">
-      <a class="pill" href="#/browse?sort=recent">Recently recommended</a>
-      ${meta('#/browse?len=long', 'Longs')}
-      ${meta('#/browse?sort=gems', 'Hidden gems')}
       <a class="pill" href="#/browse">All videos</a>
+      <a class="pill" href="#/browse?sort=recent">Recently recommended</a>
+      ${B.has_meta ? '<a class="pill" href="#/browse?len=long">Longs</a><a class="pill" href="#/browse?sort=gems">Hidden gems</a>' : ''}
     </div>
     <div class="areas">${B.areas.map(a => `<section class="areacard">
       <div class="areaname"><a href="#/a/${a.id}">${esc(a.name)}</a><span class="count">${a.count}</span>${topicCtl(a.id, a.w)}</div>
@@ -652,32 +643,41 @@ function pageCategories() {
 }
 
 function pageSetup() {
+  const n = x => x.toLocaleString();
   const sw = (key, name, text) => `<label class="setting"><span><b>${name}</b><span>${text}</span></span>
       <input type="checkbox" class="switch" data-set="${key}" ${B.settings[key] ? 'checked' : ''}></label>`;
+  const imp = B.imported;
   main(`<div class="pagehead"><h2>Settings</h2></div>
     <div class="about">
     ${sw('ask_intent', 'Ask what I am here for', 'Before the first video of a sitting, one tap: learn something, unwind, or just this video. The answer is shown back when a video ends, counted on the Review page, and "just this video" checks with you before playing a second one.')}
     ${sw('calm', 'Calm presentation', 'No view counts, and no "new" dots or badges asking for attention. Uploads from followed channels still arrive in your queue.')}
-    ${sw('hide_watched', 'Hide played videos', 'Watched videos disappear from the home page, Browse, search, channel pages and related videos instead of showing dimmed. History, Liked and playlists still list them.')}
+    ${sw('hide_watched', 'Hide played videos', 'Watched videos disappear from the home page, Explore, search, channel pages and related videos instead of showing dimmed. The Library and playlists still list them.')}
     ${sw('dearrow', 'Video frames and plain titles (DeArrow)', 'Show a frame from the video instead of the uploader\'s thumbnail, and the community-written title from <a href="https://dearrow.ajay.app" target="_blank" rel="noopener">DeArrow</a> where one exists. Hover a title to see the original. Video ids are looked up on DeArrow\'s servers (by hash prefix).')}
     <label class="setting"><span><b>Keep long uploads off Home</b><span>New videos from channels you follow that run longer than this stay on the Following page and never enter the home page queue. To keep one channel off Home altogether, use the house button next to it on Following.</span></span>
-      <select class="field" data-num="home_max_len" aria-label="Longest upload shown on Home">${[[0, 'No limit'], [3600, 'Over 1 hour'], [7200, 'Over 2 hours'], [10800, 'Over 3 hours']].map(([n, t]) => `<option value="${n}" ${B.home_max_len === n ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-    <h3 class="sechead">Your YouTube history</h3>
-    <p class="fine" style="margin-top:4px">From a Google Takeout export of &ldquo;YouTube and YouTube Music&rdquo;. The watch history (<code>history/watch-history.json</code> or <code>.html</code>) marks those videos as watched here and tells recommendations what you tend to watch. A playlist file of liked videos turns them into likes. Nothing leaves this computer.</p>
-    <div class="forms" style="margin-top:8px">
-      <label class="pill">Import watch history<input type="file" id="histfile" accept=".json,.html,application/json,text/html" hidden></label>
-      <label class="pill">Import liked videos<input type="file" id="likesfile" accept=".csv,text/csv" hidden></label>
-      ${B.imported.watched || B.imported.ratings ? `<button class="pill danger" data-act="forgetimport" title="Removes the ${B.imported.watched.toLocaleString()} watched marks and ${B.imported.ratings.toLocaleString()} likes that came from Takeout files. What you did in this app stays.">Take the import back</button>` : ''}
-    </div><div id="takeoutres"></div>
-    <h3 class="sechead">Keyboard</h3>
-    <p class="fine" style="margin-top:4px">Press <code>?</code> anywhere for the list of shortcuts.</p>
-    <h3 class="sechead">YouTube API key</h3>
-    <p class="fine" style="margin-top:4px">For durations, new uploads and playlist import.</p>
-    <div class="stats">
-      <div class="stat"><b>${B.has_meta.toLocaleString()}</b><span>of ${B.total.toLocaleString()} videos have durations</span></div>
-      <div class="stat"><b>${B.has_key ? 'Connected' : 'Not set'}</b><span>YouTube API key in this session</span></div>
+      <select class="field" data-num="home_max_len" aria-label="Longest upload shown on Home">${[[0, 'No limit'], [3600, 'Over 1 hour'], [7200, 'Over 2 hours'], [10800, 'Over 3 hours']].map(([v, t]) => `<option value="${v}" ${B.home_max_len === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+
+    <h3 class="sechead">Bring in your YouTube data</h3>
+    <p class="fine">Watch history, likes, subscriptions and playlists, from a Google Takeout export. You see what is in it before anything changes. Nothing leaves this computer.</p>
+    <div class="drop" id="todrop">
+      <span>Drop the Takeout .zip or folder here, or</span>
+      <label class="pill solid">Choose .zip<input type="file" id="tofiles" accept=".zip,.csv,.json,.html" multiple hidden></label>
+      <label class="pill">Choose folder<input type="file" id="todir" webkitdirectory hidden></label>
     </div>
-    <p>The video library ships without YouTube's own metadata. A free key (no credit card, about 5 minutes) unlocks the length filter, new uploads from followed channels, and playlist import.</p>
+    <details class="howto"><summary>How to get the export</summary><ol>
+      <li>On <a href="https://takeout.google.com/" target="_blank" rel="noopener">takeout.google.com</a>, click <b>Deselect all</b>, then tick <b>YouTube and YouTube Music</b>.</li>
+      <li>Under <b>All YouTube data included</b>, untick <b>videos</b> so the download stays small.</li>
+      <li><b>Next step &rarr; Create export</b>. Google emails a link when it is ready.</li>
+      <li>Drop the downloaded .zip here as it is; no need to unzip it.</li>
+    </ol></details>
+    <div id="takeoutres"></div>
+    ${imp.watched || imp.ratings ? `<p class="fine undoimp">${n(imp.watched)} watched marks and ${n(imp.ratings)} likes here came from Takeout.
+      <button class="pill danger" data-act="forgetimport" title="What you did in this app stays. Followed channels and playlists stay too.">Take them back</button></p>` : ''}
+
+    <h3 class="sechead">YouTube API key</h3>
+    <p class="fine">${B.has_key
+      ? `Connected.${B.has_meta < B.total * .99 ? ` ${n(B.has_meta)} of ${n(B.total)} library videos have lengths; <code>pixi run fetch-meta</code> fetches the rest.` : ''}`
+      : 'Not set. A free key adds video lengths, new uploads from channels you follow, playlists and channels by link, and YouTube results under searches. Everything else works without one.'}</p>
+    <details class="howto"><summary>How to get a key</summary>
     <ol class="steps">
       <li>Open <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">console.cloud.google.com</a> and sign in.</li>
       <li>Top bar &rarr; project picker &rarr; <b>New project</b> (any name, e.g. "personaltube").</li>
@@ -690,7 +690,10 @@ pixi run fetch-meta     # once: durations for every video, ~130 quota units
 pixi run start          # restart the app; it reads the key from the keyring</pre></li>
     </ol>
     <p class="fine">Free quota is 10,000 units a day. Checking uploads costs about 2 units per followed channel, twice a day at most.
-      Re-run <code>pixi run fetch-meta --refresh</code> every few months to keep durations and deletions current.</p></div>`);
+      Re-run <code>pixi run fetch-meta --refresh</code> every few months to keep durations and deletions current.</p></details>
+
+    <h3 class="sechead">Keyboard</h3>
+    <p class="fine">Press <code>?</code> anywhere for the list of shortcuts.</p></div>`);
 }
 
 // The last seven days, laid out for you to judge rather than to keep you going.
@@ -733,7 +736,7 @@ const routeName = () => location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
 
 // The tab title: a page sets pageTitle for a name of its own (a video, a channel, a playlist); the rest are fixed.
 let pageTitle = '';
-const TITLES = { foryou: 'For You', categories: 'Categories', following: 'Following', playlists: 'Playlists', history: 'History', liked: 'Liked', review: 'Review', setup: 'Settings', done: 'Done for now' };
+const TITLES = { foryou: 'For You', explore: 'Explore', categories: 'Explore', following: 'Following', playlists: 'Playlists', review: 'Review', setup: 'Settings', done: 'Done for now' };
 
 async function route() {
   stopPlayer();
@@ -745,7 +748,7 @@ async function route() {
   const p = Object.fromEntries(new URLSearchParams(qs));
   const [name, ...rest] = path.split('/');
   const arg = decodeURIComponent(rest.join('/'));
-  const tab = { '': 'mix', foryou: 'foryou', liked: 'liked', browse: 'browse', categories: 'categories', a: 'categories', c: 'categories', channel: 'following', following: 'following', playlists: 'playlists', playlist: 'playlists', history: 'history', review: 'review', setup: 'setup' }[name];
+  const tab = { '': 'mix', foryou: 'foryou', explore: 'explore', categories: 'explore', browse: 'explore', a: 'explore', c: 'explore', channel: 'following', following: 'following', playlists: 'playlists', playlist: 'playlists', library: 'library', history: 'library', liked: 'library', review: 'review', setup: 'setup' }[name];
   document.querySelectorAll('#side .nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
   $('#search input').value = name === 'browse' ? (p.q || '') : '';
   try {
@@ -758,12 +761,13 @@ async function route() {
     else if (name === 'following') await pageFollowing(arg);
     else if (name === 'playlists') await pagePlaylists();
     else if (name === 'playlist') await pagePlaylist(arg);
-    else if (name === 'history') await pageHistory();
+    else if (name === 'library') await pageLibrary(arg);
+    else if (name === 'history') await pageLibrary('');      // older addresses
+    else if (name === 'liked') await pageLibrary('liked');
     else if (name === 'foryou') await pageForYou(p);
-    else if (name === 'liked') await pageLiked();
     else if (name === 'review') await pageReview();
     else if (name === 'done') await pageDone();
-    else if (name === 'categories') pageCategories();
+    else if (name === 'explore' || name === 'categories') pageExplore();
     else if (name === 'setup') pageSetup();
     else notFound();
   } catch (e) {
@@ -837,7 +841,7 @@ function markRated(vid, r) {
   });
 }
 // pages where the "hide played videos" setting removes a video as soon as it is marked watched
-const hidesWatched = () => B.settings.hide_watched && !/^#\/(v|playlist|history|liked|review|setup)/.test(location.hash);
+const hidesWatched = () => B.settings.hide_watched && !/^#\/(v|playlist|library|history|liked|review|setup)/.test(location.hash);
 async function setWatched(vid, on) {
   const r = await api('/watched/' + vid, { watched: on });
   if (on && hidesWatched()) {
@@ -916,17 +920,6 @@ document.addEventListener('click', async e => {
       return;
     }
     switch (t.dataset.act) {
-      case 'subsall': case 'subsnone': case 'subshn':
-        document.querySelectorAll('#chanresults .subpick:not(:disabled)').forEach(b => {
-          b.checked = t.dataset.act === 'subsall' || (t.dataset.act === 'subshn' && b.dataset.hn !== '0');
-        });
-        return subsCount();
-      case 'subsgo': {
-        const channels = [...document.querySelectorAll('#chanresults .subpick:checked')].map(b => ({ id: b.dataset.id, name: b.dataset.name }));
-        const r = await api('/subs/import', { channels });
-        toast(`Following ${r.added} more channel${r.added === 1 ? '' : 's'}`);
-        return refresh();
-      }
       case 'undo': {
         const fn = toastUndo;
         toastUndo = null; $('#toast').classList.remove('on', 'act');
@@ -970,23 +963,13 @@ document.addEventListener('click', async e => {
       }
       case 'jumpnext': { const li = $('#main .plrows .nextup'); if (li) li.scrollIntoView({ block: 'center' }); return; }
       case 'closekeys': $('#keys').close(); return;
-      case 'histgo': {
-        t.disabled = true; t.textContent = 'Importing…';
-        const r = await api('/takeout/history/import', { token: t.dataset.token });
-        toast(`${r.added.toLocaleString()} video${r.added === 1 ? '' : 's'} marked as watched`);
-        return refresh();
-      }
-      case 'likesgo': {
-        t.disabled = true; t.textContent = 'Importing…';
-        const r = await api('/takeout/likes', { csv: likesCsv, apply: true });
-        toast(`${r.new.toLocaleString()} like${r.new === 1 ? '' : 's'} added`);
-        return refresh();
-      }
+      case 'takeoutgo': return takeoutImport(t);
+      case 'takeoutcancel': $('#takeoutres').innerHTML = ''; return;
       case 'forgetimport':
         if (t.dataset.sure) {
           const r = await api('/takeout/forget', {});
           toast(`Took back ${r.watched.toLocaleString()} watched marks and ${r.ratings.toLocaleString()} likes`);
-          return refresh();
+          await reboot(); return route();
         }
         t.dataset.sure = 1; t.textContent = 'Really take it back? Click again';
         return;
@@ -1011,7 +994,7 @@ document.addEventListener('click', async e => {
         await api('/rate/' + vid, { rating: r });
         markRated(vid, r);
         toast(r > 0 ? 'Liked. Recommendations will lean this way.' : r < 0 ? 'Disliked. You will see fewer like it.' : 'Rating removed.');
-        if (/^#\/(liked|foryou)/.test(location.hash) || (r < 0 && routeName() === '')) return route();
+        if (/^#\/(library\/liked|liked|foryou)/.test(location.hash) || (r < 0 && routeName() === '')) return route();
         return;
       }
       case 'hide':
@@ -1026,7 +1009,6 @@ document.addEventListener('click', async e => {
         t.classList.toggle('on', !panel.hidden); t.setAttribute('aria-expanded', !panel.hidden);
         return;
       }
-      case 'random': { const r = await api('/random'); if (r.vid) location.hash = '#/v/' + r.vid; return; }
       case 'reshuffle':
         await api('/reshuffle', {});
         if (routeName() === '') await route(); else location.hash = '#/';
@@ -1041,27 +1023,17 @@ document.addEventListener('click', async e => {
         document.querySelectorAll('#plresults .plpick:not(:disabled)').forEach(b => { b.checked = t.dataset.act === 'plall'; });
         return plCount();
       case 'plgo': {
-        const picked = [...document.querySelectorAll('#plresults .plpick:checked')].map(b => takeout[b.dataset.i]);
+        const picked = [...document.querySelectorAll('#plresults .plpick:checked')].map(b => chanLists[b.dataset.i]);
         t.disabled = true; t.textContent = 'Importing…';
-        if (!picked[0].vids) {          // a channel's playlists: fetched from YouTube one at a time
-          let ok = 0, videos = 0, last, err;
-          for (const [i, p] of picked.entries()) {
-            t.textContent = `Importing ${i + 1} of ${picked.length}…`;
-            try { const r = await api('/playlists/import', { url: p.yt_id }); ok++; videos += r.count; last = r.id; }
-            catch (e2) { err = e2.message; if (/key|quota/i.test(err)) break; }
-          }
-          toast(`Imported ${ok} playlist${ok === 1 ? '' : 's'}: ${videos} videos` + (err ? `. ${picked.length - ok} failed: ${err}` : ''));
-          await reboot();
-          if (ok === 1 && picked.length === 1) location.hash = '#/playlist/' + last; else await route();
-          return;
+        let ok = 0, videos = 0, last, err;            // a channel's playlists: fetched from YouTube one at a time
+        for (const [i, p] of picked.entries()) {
+          t.textContent = `Importing ${i + 1} of ${picked.length}…`;
+          try { const r = await api('/playlists/import', { url: p.yt_id }); ok++; videos += r.count; last = r.id; }
+          catch (e2) { err = e2.message; if (/key|quota/i.test(err)) break; }
         }
-        const playlists = picked.map(p => ({ name: p.name, yt_id: p.yt_id, vids: p.vids }));
-        const r = await api('/playlists/takeout/import', { playlists });
-        const n = r.created + r.updated;
-        toast(`${r.videos} video${r.videos === 1 ? '' : 's'} added to ${n} playlist${n === 1 ? '' : 's'}`
-          + (r.unavailable ? `; ${r.unavailable} no longer on YouTube` : '') + (r.pending ? `; ${r.pending} waiting for a YouTube key` : ''));
+        toast(`Imported ${ok} playlist${ok === 1 ? '' : 's'}: ${videos} videos` + (err ? `. ${picked.length - ok} failed: ${err}` : ''));
         await reboot();
-        if (r.ids.length === 1) location.hash = '#/playlist/' + r.ids[0]; else await route();
+        if (ok === 1 && picked.length === 1) location.hash = '#/playlist/' + last; else await route();
         return;
       }
       case 'plsync': {
@@ -1092,8 +1064,7 @@ document.addEventListener('click', async e => {
   } catch (err) { fail(err); if (['refresh', 'plsync', 'plgo'].includes(t.dataset.act)) route(); }
 });
 
-let likesCsv = '';                  // the liked-videos file last previewed on Settings
-let takeout = [];                   // playlists offered in #plresults: from Takeout files (with vids) or a channel (without)
+let chanLists = [];                 // a channel's playlists, offered in #plresults to pick from
 const plCount = () => {
   const n = document.querySelectorAll('#plresults .plpick:checked').length;
   const b = $('#plgo');
@@ -1104,75 +1075,20 @@ const syncMsg = r => {
   return `"${r.name}": ` + (bits.join(', ') || 'already up to date');
 };
 
-const subsCount = () => {
-  const n = document.querySelectorAll('#chanresults .subpick:checked').length;
-  const b = $('#subsgo');
-  b.textContent = `Follow ${n} selected`; b.disabled = !n;
-};
-
 document.addEventListener('change', async e => {
-  if (e.target.id === 'subsfile') {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-      const d = await api('/subs/preview', { csv: await file.text() });
-      const fresh = d.items.filter(c => !c.followed);
-      $('#chanresults').innerHTML = `<div class="rows">
-        <div class="r plain subhead"><div class="name"><b>${d.items.length} subscription${d.items.length === 1 ? '' : 's'} in ${esc(file.name)}</b>
-          <div class="sub">${fresh.length} not followed yet &middot; ${fresh.filter(c => c.hn).length} of those are in the library</div></div>
-          <button class="pill" data-act="subsall">All</button><button class="pill" data-act="subshn">Only those in the library</button><button class="pill" data-act="subsnone">None</button>
-          <button class="pill solid" data-act="subsgo" id="subsgo"></button></div>
-        ${d.items.map(c => `<label class="r plain"><input type="checkbox" class="subpick" data-id="${esc(c.id)}" data-name="${esc(c.name)}" data-hn="${c.hn}" ${c.followed ? 'disabled' : 'checked'}>
-          <div class="name"><b>${esc(c.name)}</b><div class="sub">${c.hn ? `${c.hn} in the library` : 'Not in the library'}</div></div>
-          ${c.followed ? '<span class="muted">Already following</span>' : ''}</label>`).join('')}</div>`;
-      subsCount();
-    } catch (err) { fail(err); }
+  if (e.target.id === 'tofiles' || e.target.id === 'todir') {
+    const picked = [...e.target.files].map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
     e.target.value = '';
-    return;
+    return takeoutScan(picked);
   }
-  if (e.target.id === 'plfiles') {
-    const picked = [...e.target.files];
-    if (!picked.length) return;
-    try {
-      const d = await api('/playlists/takeout/preview', { files: await Promise.all(picked.map(async f => ({ name: f.name, csv: await f.text() }))) });
-      takeout = d.items;
-      const unknown = d.items.reduce((n, p) => n + p.unknown, 0);
-      $('#plresults').innerHTML = `<div class="rows">
-        <div class="r plain subhead"><div class="name"><b>${d.items.length} playlist${d.items.length === 1 ? '' : 's'} found</b>
-          <div class="sub">${[d.empty.length && `${d.empty.length} file${d.empty.length === 1 ? '' : 's'} without videos skipped`,
-            unknown && !B.has_key && `${unknown} videos from outside the library will stay hidden until you sync with a YouTube key`].filter(Boolean).join(' &middot; ')}</div></div>
-          <button class="pill" data-act="plall">All</button><button class="pill" data-act="plnone">None</button>
-          <button class="pill solid" data-act="plgo" id="plgo"></button></div>
-        ${d.items.map((p, i) => { const done = p.existing && !p.new; return `<label class="r plain"><input type="checkbox" class="plpick" data-i="${i}" ${done ? 'disabled' : 'checked'}>
-          <div class="name"><b>${esc(p.name)}</b><div class="sub">${p.total} video${p.total === 1 ? '' : 's'} &middot; ${p.hn} in the library</div></div>
-          ${done ? '<span class="muted">Already imported</span>' : p.existing ? `<span class="muted">Adds ${p.new} to your existing playlist</span>` : ''}</label>`; }).join('')}</div>`;
-      plCount();
-    } catch (err) { fail(err); }
-    e.target.value = '';
-    return;
+  if (e.target.classList.contains('tokind')) {      // a whole part on or off: its channels or playlists follow
+    document.querySelectorAll(`#takeoutres .topick[data-part="${e.target.dataset.part}"]:not(:disabled)`).forEach(b => { b.checked = e.target.checked; });
+    return takeoutCount();
   }
-  if (e.target.id === 'histfile' || e.target.id === 'likesfile') {
-    const file = e.target.files[0], out = $('#takeoutres');
-    if (!file) return;
-    out.innerHTML = `<p class="note">Reading ${esc(file.name)}…</p>`;
-    try {
-      const n = x => x.toLocaleString(), row = (text, sub, btn) => `<div class="rows"><div class="r plain subhead"><div class="name"><b>${text}</b><div class="sub">${sub}</div></div>${btn}</div></div>`;
-      if (e.target.id === 'histfile') {     // the file goes up as it is: histories run to tens of megabytes
-        const r = await fetch('/api/takeout/history/preview', { method: 'POST', body: file });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
-        out.innerHTML = row(`${n(d.videos)} videos in ${esc(file.name)}`,
-          `${d.first ? `${esc(d.first)} to ${esc(d.last)} &middot; ` : ''}${n(d.library)} are in the library &middot; ${n(d.new)} not marked watched here yet`,
-          d.new ? `<button class="pill solid" data-act="histgo" data-token="${esc(d.token)}">Mark ${n(d.new)} as watched</button>` : '<span class="muted">Already imported</span>');
-      } else {
-        likesCsv = await file.text();
-        const d = await api('/takeout/likes', { csv: likesCsv });
-        out.innerHTML = row(`${n(d.videos)} videos in ${esc(file.name)}`, `${n(d.new)} without a rating here yet &middot; ${n(d.library)} of those are in the library`,
-          d.new ? `<button class="pill solid" data-act="likesgo">Like ${n(d.new)} videos</button>` : '<span class="muted">Nothing new</span>');
-      }
-    } catch (err) { out.innerHTML = ''; fail(err); }
-    e.target.value = '';
-    return;
+  if (e.target.classList.contains('topick')) {
+    const k = $(`#to-${e.target.dataset.part}`);
+    k.checked = !!document.querySelector(`#takeoutres .topick[data-part="${e.target.dataset.part}"]:checked`);
+    return takeoutCount();
   }
   if (e.target.dataset.num) {
     const k = e.target.dataset.num, n = +e.target.value;
@@ -1180,7 +1096,6 @@ document.addEventListener('change', async e => {
     return;
   }
   if (e.target.classList.contains('plpick')) return plCount();
-  if (e.target.classList.contains('subpick')) return subsCount();
   if (e.target.dataset.set) {
     try { B.settings = await api('/settings', { [e.target.dataset.set]: e.target.checked }); renderSide(); toast('Saved.'); }
     catch (err) { e.target.checked = !e.target.checked; fail(err); }
@@ -1198,7 +1113,7 @@ document.addEventListener('submit', async e => {
       closePopup(); toast('Playlist created'); await reboot();
     } else if (f.id === 'plimport' && !/[?&]list=/.test(data.url) && /@|\/(channel|c|user)\/|^\s*UC[\w-]{22}\s*$/.test(data.url)) {
       const d = await api('/playlists/channel', { url: data.url });
-      takeout = d.items;
+      chanLists = d.items;
       $('#plresults').innerHTML = d.items.length ? `<div class="rows">
         <div class="r plain subhead"><div class="name"><b>${d.items.length} public playlist${d.items.length === 1 ? '' : 's'} by ${esc(d.channel)}</b>
           <div class="sub">Tick the ones to import</div></div>
@@ -1242,7 +1157,7 @@ $('#theme').addEventListener('click', () => {
 });
 // ---- keyboard. j / k walk the videos on a page (focus moves to the title, so Enter opens it); the letter keys
 // act on the focused video, or on the video of a video page; "g" then a letter goes to a page. "?" lists them.
-const GO = { h: '#/', y: '#/foryou', b: '#/browse', c: '#/categories', f: '#/following', p: '#/playlists', l: '#/liked', i: '#/history', r: '#/review', s: '#/setup' };
+const GO = { h: '#/', y: '#/foryou', e: '#/explore', f: '#/following', p: '#/playlists', l: '#/library', r: '#/review', s: '#/setup' };
 const KEY_ACT = { w: 'later', m: 'seen', l: 'like', p: 'watch' };
 let goAt = 0;
 // run a data-act on a video as if a button inside its card had been clicked
@@ -1326,6 +1241,158 @@ document.addEventListener('drop', async e => {
   try { await api(`/playlists/${li.dataset.pl}/move`, { vid, before }); await route(); } catch (err) { fail(err); }
 });
 document.addEventListener('dragend', () => { dragVid = null; dropMarks(); });
+
+// ---------------------------------------------------------------- Google Takeout import (Settings)
+// The export arrives as a .zip (or the parts of a split one), its unzipped folder, or single files from it. The
+// files go to the server one at a time under one token; it says what they hold, and nothing changes until Import.
+const TO_WANT = /\.(csv|json|html?)$/i;
+const TO_MAX = 300e6;                // the server's limit for one file
+
+// The entries of a zip worth sending, as { path, size, open() -> Blob }. The archive is read in place from its
+// central directory, so only those entries are inflated (an export can hold gigabytes of uploaded videos).
+async function zipEntries(file) {
+  const view = async (at, len) => new DataView(await file.slice(at, at + len).arrayBuffer());
+  const tl = Math.min(file.size, 65557), tail = await view(file.size - tl, tl);
+  let e = -1;
+  for (let i = tl - 22; i >= 0; i--) if (tail.getUint32(i, true) === 0x06054b50) { e = i; break; }
+  if (e < 0) throw new Error(`${file.name} is not a zip file, or is not complete`);
+  let count = tail.getUint16(e + 10, true), size = tail.getUint32(e + 12, true), off = tail.getUint32(e + 16, true);
+  if (e >= 20 && tail.getUint32(e - 20, true) === 0x07064b50) {     // zip64: over 4 GB or 65,535 entries
+    const z = await view(Number(tail.getBigUint64(e - 12, true)), 56);
+    count = Number(z.getBigUint64(32, true)); size = Number(z.getBigUint64(40, true)); off = Number(z.getBigUint64(48, true));
+  }
+  const cd = await view(off, size), dec = new TextDecoder(), out = [];
+  for (let at = 0, k = 0; k < count && at + 46 <= size && cd.getUint32(at, true) === 0x02014b50; k++) {
+    const method = cd.getUint16(at + 10, true), nl = cd.getUint16(at + 28, true), xl = cd.getUint16(at + 30, true);
+    let csize = cd.getUint32(at + 20, true), usize = cd.getUint32(at + 24, true), local = cd.getUint32(at + 42, true);
+    const path = dec.decode(new Uint8Array(cd.buffer, cd.byteOffset + at + 46, nl));
+    for (let x = at + 46 + nl; x + 4 <= at + 46 + nl + xl; x += 4 + cd.getUint16(x + 2, true)) {
+      if (cd.getUint16(x, true) !== 1) continue;                    // the zip64 field: the sizes that did not fit
+      let y = x + 4;
+      if (usize === 0xFFFFFFFF) { usize = Number(cd.getBigUint64(y, true)); y += 8; }
+      if (csize === 0xFFFFFFFF) { csize = Number(cd.getBigUint64(y, true)); y += 8; }
+      if (local === 0xFFFFFFFF) local = Number(cd.getBigUint64(y, true));
+    }
+    at += 46 + nl + xl + cd.getUint16(at + 32, true);
+    if (!TO_WANT.test(path) || (method !== 0 && method !== 8)) continue;
+    out.push({ path, size: usize, open: async () => {
+      const h = await view(local, 30), start = local + 30 + h.getUint16(26, true) + h.getUint16(28, true);
+      const raw = file.slice(start, start + csize);
+      return method === 0 ? raw : new Response(raw.stream().pipeThrough(new DecompressionStream('deflate-raw'))).blob();
+    } });
+  }
+  return out;
+}
+
+// picked: [{ file, path }] from a file picker or a drop. Zips are opened up; a whole Google export holds other
+// products too, so when there is a YouTube folder only its files are kept.
+async function takeoutFiles(picked) {
+  let out = [];
+  for (const { file, path } of picked) {
+    if (/\.zip$/i.test(file.name)) out.push(...await zipEntries(file));
+    else if (TO_WANT.test(file.name)) out.push({ path, size: file.size, open: async () => file });
+  }
+  if (out.some(f => /youtube/i.test(f.path))) out = out.filter(f => /youtube/i.test(f.path));
+  return out.filter(f => f.size <= TO_MAX);
+}
+
+async function takeoutScan(picked) {
+  const box = $('#takeoutres');
+  if (!picked.length || !box) return;
+  box.innerHTML = '<p class="note">Reading…</p>';
+  try {
+    const files = await takeoutFiles(picked);
+    if (!files.length) throw new Error('nothing from YouTube in there. Pick the Takeout .zip, its unzipped folder, or files from its "YouTube and YouTube Music" folder.');
+    const token = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    for (const [i, f] of files.entries()) {
+      box.innerHTML = `<p class="note">Reading ${i + 1} of ${files.length} files…</p>`;
+      const r = await fetch('/api/takeout/file?' + qs({ token, name: f.path }), { method: 'POST', body: await f.open() });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText); }
+    }
+    takeoutShow(token, await api('/takeout/summary?' + qs({ token })));
+  } catch (err) { box.innerHTML = ''; fail(err); }
+}
+
+// One row per kind of data found, ticked when it would bring something new; channels and playlists can be
+// picked one by one under "Choose".
+function takeoutShow(token, d) {
+  const n = x => x.toLocaleString(), s = (x, one, many) => `${n(x)} ${x === 1 ? one : many}`;
+  const mon = day => new Date(day + 'T12:00').toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+  const part = (key, title, bits, fresh, picks) => `<div class="r plain">
+    <input type="checkbox" class="tokind" id="to-${key}" data-part="${key}" ${fresh ? 'checked' : 'disabled'}>
+    <div class="name"><label for="to-${key}"><b>${title}</b></label><div class="sub">${bits.filter(Boolean).join(' &middot; ')}</div>
+      ${picks && fresh ? `<details><summary>Choose</summary><div class="topicks">${picks}</div></details>` : ''}</div></div>`;
+  const pick = (key, v, on, name, note) => `<label><input type="checkbox" class="topick" data-part="${key}" data-v="${esc(v)}" ${on ? 'checked' : 'disabled'}>
+    <span>${esc(name)}</span><span class="muted">${note}</span></label>`;
+  let h = '';
+  if (d.history) {
+    const x = d.history;
+    h += part('history', 'Watch history', [s(x.videos, 'video', 'videos') + (x.first ? `, ${mon(x.first)} to ${mon(x.last)}` : ''),
+      `${n(x.library)} in the library`, x.new ? `${n(x.new)} not marked watched here yet` : 'all marked watched already'], x.new);
+  }
+  if (d.likes) {
+    const x = d.likes;
+    h += part('likes', 'Liked videos', [s(x.videos, 'video', 'videos'), x.new ? `${n(x.new)} not liked here yet` : 'all liked already'], x.new);
+  }
+  if (d.subs) {
+    const fresh = d.subs.filter(c => !c.followed);
+    h += part('subs', 'Subscriptions', [s(d.subs.length, 'channel', 'channels'), fresh.length ? `${n(fresh.length)} not followed yet` : 'all followed already'],
+      fresh.length, d.subs.map(c => pick('subs', c.id, !c.followed, c.name, c.followed ? 'following' : c.hn ? `${c.hn} in the library` : '')).join(''));
+  }
+  if (d.playlists) {
+    const fresh = d.playlists.filter(p => p.new), videos = fresh.reduce((t, p) => t + p.new, 0);
+    const unknown = !B.has_key && fresh.reduce((t, p) => t + p.unknown, 0);
+    h += part('playlists', 'Playlists', [s(d.playlists.length, 'playlist', 'playlists'), fresh.length ? `${s(videos, 'video', 'videos')} to add` : 'all here already',
+      unknown && `${n(unknown)} from outside the library show once a YouTube key is set`], fresh.length,
+      d.playlists.map(p => pick('playlists', p.i, p.new, p.name, !p.new ? 'here already' : p.existing ? `adds ${p.new} to yours` : s(p.total, 'video', 'videos'))).join(''));
+  }
+  const box = $('#takeoutres');
+  box.dataset.token = token;
+  box.innerHTML = `<div class="rows takeout">${h}
+    <div class="r plain"><button class="pill solid" data-act="takeoutgo" id="takeoutgo">Import</button><button class="pill" data-act="takeoutcancel">Cancel</button></div></div>`;
+  takeoutCount();
+}
+const takeoutCount = () => { $('#takeoutgo').disabled = !document.querySelector('#takeoutres .tokind:checked'); };
+
+async function takeoutImport(btn) {
+  const box = $('#takeoutres'), on = k => !!(box.querySelector(`#to-${k}`) || {}).checked;
+  const picks = k => on(k) ? [...box.querySelectorAll(`.topick[data-part="${k}"]:checked`)].map(b => b.dataset.v) : [];
+  btn.disabled = true; btn.textContent = 'Importing…';
+  let r;
+  try {
+    r = await api('/takeout/import', { token: box.dataset.token, history: on('history'), likes: on('likes'),
+      subs: picks('subs'), playlists: picks('playlists').map(Number) });
+  } catch (err) { btn.disabled = false; btn.textContent = 'Import'; throw err; }
+  const n = x => x.toLocaleString(), pl = r.playlists;
+  const bits = [r.watched && `${n(r.watched)} marked watched`, r.liked && `${n(r.liked)} liked`,
+    r.followed && `following ${n(r.followed)} more channel${r.followed === 1 ? '' : 's'}`,
+    pl && pl.videos && `${n(pl.videos)} video${pl.videos === 1 ? '' : 's'} in ${n(pl.ids.length)} playlist${pl.ids.length === 1 ? '' : 's'}`].filter(Boolean);
+  toast(bits.length ? 'Brought in: ' + bits.join(', ') + '.' + (pl && pl.pending ? ` ${n(pl.pending)} playlist videos wait for a YouTube key.` : '') : 'Nothing new to bring in.');
+  await reboot();
+  return route();
+}
+
+// dropping a zip, files or a folder on the Settings drop area
+const readDir = async rd => { const all = []; for (;;) { const b = await new Promise((ok, no) => rd.readEntries(ok, no)); if (!b.length) return all; all.push(...b); } };
+const dropWalk = async en => en.isFile
+  ? [await new Promise((ok, no) => en.file(file => ok({ file, path: en.fullPath.replace(/^\//, '') }), no))]
+  : (await Promise.all((await readDir(en.createReader())).map(dropWalk))).flat();
+for (const ev of ['dragenter', 'dragover']) document.addEventListener(ev, e => {
+  const zone = e.target.closest && e.target.closest('#todrop');
+  if (!zone || dragVid) return;
+  e.preventDefault(); zone.classList.add('over');
+});
+document.addEventListener('dragleave', e => { const z = $('#todrop'); if (z && e.target === z && !z.contains(e.relatedTarget)) z.classList.remove('over'); });
+document.addEventListener('drop', async e => {
+  const zone = e.target.closest && e.target.closest('#todrop');
+  if (!zone || dragVid) return;
+  e.preventDefault(); zone.classList.remove('over');
+  const entries = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  try {
+    takeoutScan(entries.length ? (await Promise.all(entries.map(dropWalk))).flat()
+      : [...e.dataTransfer.files].map(file => ({ file, path: file.name })));
+  } catch (err) { fail(err); }
+});
 
 document.addEventListener('input', e => {
   if (e.target.id === 'chanfilter') { chanFilter = e.target.value; applyChanFilter(); }
