@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-PersonalTube is a single-user, local-only web app: a personal YouTube front page that is on the viewer's side rather than YouTube's. The user's own queue comes first, suggestions are few and explained, and the player is built to end (see "Design stance"). Its video library is the HackerTube data export (videos recommended on Hacker News), but that is a silent backbone: the UI calls it "the library" and does not mention HN outside the attribution footer and the collapsed "What people said" section of a video. `DATA.md` is the authoritative description of the dataset files (schemas, joins, caveats, licence); read it before touching anything that consumes them.
+PersonalTube is a single-user, local-only web app: a personal YouTube front page that is on the viewer's side rather than YouTube's. The user's own queue comes first, suggestions are few and explained, and the player is built to end (see "Design stance"). Its video library is the HackerTube data export (videos recommended on Hacker News), but that is a silent backbone: the UI calls it "the library" and does not mention HN outside the attribution footer and the collapsed "What people said" section of a video.
 
 ## Commands
 
@@ -65,6 +65,7 @@ YouTube API calls go through `yt()`, which turns failures into `HTTPException`s 
 
 - **Do not change the port (8765) or bind address, and do not add a second way to play videos that avoids this origin.** All playback must happen in a page served from `http://127.0.0.1:8765`; tooling outside this repository depends on that exact origin.
 - YouTube API data must not be redistributed: `youtube_meta.jsonl` and `state.db` stay gitignored, and the key never goes in a file.
-- The dataset is ODC-By; keep the attribution in the sidebar footer of `static/index.html`.
 - The server uses only the standard library plus FastAPI/uvicorn and numpy; the fetch script is standard library only. Add new dependencies through `pixi.toml`.
-- DeArrow data is CC BY-NC-SA 4.0: keep its credit in the sidebar footer, look videos up by hash prefix, and never submit to its API.
+- For DeArrow data, look videos up by hash prefix, and never submit to its API.
+
+s
