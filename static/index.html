@@ -60,6 +60,24 @@
 <main id="main"><p class="empty">Loading…</p></main>
 
 <div id="popup" hidden></div>
+<dialog id="keys" aria-labelledby="keys-h">
+  <h3 id="keys-h">Keyboard</h3>
+  <dl>
+    <dt><kbd>/</kbd></dt><dd>Search</dd>
+    <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next and previous video on the page; <kbd>Enter</kbd> opens it</dd>
+    <dt><kbd>w</kbd></dt><dd>Watch later</dd>
+    <dt><kbd>s</kbd></dt><dd>Save to a playlist</dd>
+    <dt><kbd>m</kbd></dt><dd>Mark watched</dd>
+    <dt><kbd>l</kbd></dt><dd>Like</dd>
+    <dt><kbd>p</kbd></dt><dd>Play</dd>
+    <dt><kbd>Space</kbd></dt><dd>Play or pause, on a video's page</dd>
+    <dt><kbd>&larr;</kbd> <kbd>&rarr;</kbd></dt><dd>Back or ahead 10 seconds</dd>
+    <dt><kbd>g</kbd> then</dt><dd><kbd>h</kbd> Home, <kbd>y</kbd> For You, <kbd>b</kbd> Browse, <kbd>c</kbd> Categories, <kbd>f</kbd> Following,
+      <kbd>p</kbd> Playlists, <kbd>l</kbd> Liked, <kbd>i</kbd> History, <kbd>r</kbd> Review, <kbd>s</kbd> Settings</dd>
+  </dl>
+  <p class="fine">Once you click inside a playing video, the keys go to YouTube's player until you click outside it.</p>
+  <button class="pill" data-act="closekeys">Close</button>
+</dialog>
 <div id="toast" role="status" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>

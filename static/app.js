@@ -24,6 +24,10 @@ const I = {
   list: svg('M3 6h12v2H3zm0 4h12v2H3zm0 4h8v2H3zm12 0v6l5-3z'),
   tune: svg('M15 17h6v1h-6v-1zm-4 0H3v1h8v2h1v-5h-1v2zm3-9h1V3h-1v2H3v1h11v2zm4-3v1h3V5h-3zM6 14h1V9H6v2H3v1h3v2zm4-2h11v-1H10v1z'),
   like: svg('M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z'),
+  clock: svg('M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z'),
+  minus: svg('M19 13H5v-2h14v2z'),
+  home: svg('M4 21V10.08l8-6.96 8 6.96V21h-6v-6h-4v6H4z'),
+  grip: svg('M11 18c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm-2-8c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0-6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z'),
   dislike: svg('M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z'),
 };
 
@@ -37,12 +41,15 @@ async function api(path, body, method) {
   return j;
 }
 
-let toastTimer;
-function toast(msg) {
+// A toast can carry one way back: `undo` is a function, offered as an Undo button for a few seconds.
+let toastTimer, toastUndo = null;
+function toast(msg, undo) {
   const t = $('#toast');
-  t.textContent = msg; t.classList.add('on');
+  toastUndo = undo || null;
+  t.innerHTML = `<span>${esc(msg)}</span>` + (undo ? '<button data-act="undo">Undo</button>' : '');
+  t.classList.add('on'); t.classList.toggle('act', !!undo);
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('on'), 4500);
+  toastTimer = setTimeout(() => { t.classList.remove('on', 'act'); toastUndo = null; }, undo ? 8000 : 4500);
 }
 const fail = e => toast('Something went wrong: ' + e.message);
 
@@ -72,6 +79,8 @@ const vt = v => `<a class="vt" data-tt href="#/v/${v.vid}" title="${esc(tip(v))}
 const initial = name => esc((String(name || '?').trim()[0] || '?'));
 const seenTitle = on => on ? 'Unmark as watched' : 'Mark as watched';
 const seenLabel = on => on ? 'Watched' : 'Mark watched';
+const laterTitle = on => on ? 'Remove from Watch later' : 'Watch later';
+const laterPill = v => `<button class="pill ${v.later ? 'on' : ''}" data-act="later" title="${laterTitle(v.later)}">${I.clock}<span class="lbl">Watch later</span></button>`;
 const followBtn = (channel, on) => `<button class="pill ${on ? '' : 'solid'}" data-follow="${esc(channel)}" data-on="${on ? 1 : 0}">${on ? 'Following' : 'Follow'}</button>`;
 
 // ---------------------------------------------------------------- pieces
@@ -79,7 +88,7 @@ const followBtn = (channel, on) => `<button class="pill ${on ? '' : 'solid'}" da
 function badges(v) {
   let h = '';
   if (v.reason) {
-    const to = v.reason.playlist ? `#/playlist/${v.reason.playlist}` : v.reason.vid ? `#/v/${v.reason.vid}` : v.reason.area ? `#/a/${v.reason.area}` : '';
+    const to = v.reason.playlist ? `#/playlist/${v.reason.playlist}` : v.reason.vid ? `#/v/${v.reason.vid}` : v.reason.area ? `#/a/${v.reason.area}` : v.reason.cat ? `#/c/${v.reason.cat}` : '';
     h += `<span class="via ${esc(v.reason.kind)}">${to ? `<a href="${to}">${esc(v.reason.text)}</a>` : esc(v.reason.text)}</span>`;
   }
   if (v.new && !B.settings.calm) h += '<span class="via new">New</span>';
@@ -113,7 +122,8 @@ const fmtMin = s => { const m = Math.round(s / 60); return m >= 60 ? `${Math.flo
 const tallyText = t => t && t.secs >= 60 ? `Today: ${t.videos} video${t.videos === 1 ? '' : 's'}, ${fmtMin(t.secs)}` : '';
 function thumbBox(v, q) {
   return `<div class="thumb"><a href="#/v/${v.vid}" tabindex="-1" aria-hidden="true">${timg(v, q)}${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}${v.frac ? `<span class="tprog"><i style="width:${Math.round(v.frac * 100)}%"></i></span>` : ''}</a>
-    <button class="tbtn" data-act="seen" title="${seenTitle(v.watched)}" aria-label="${seenTitle(v.watched)}">${I.check}</button></div>`;
+    <button class="tbtn" data-act="seen" title="${seenTitle(v.watched)}" aria-label="${seenTitle(v.watched)}">${I.check}</button>
+    <button class="tbtn later ${v.later ? 'on' : ''}" data-act="later" title="${laterTitle(v.later)}" aria-label="${laterTitle(v.later)}">${I.clock}</button></div>`;
 }
 const kebab = '<button class="ibtn kebab" data-act="menu" aria-label="More actions" title="More actions">' + I.more + '</button>';
 function card(v) {
@@ -171,6 +181,12 @@ function filterBar(base, keep, f, extra = '', head = '') {
         : `<a href="${link(k, v)}" class="${f[k] === v ? 'on' : ''}">${esc(label)}</a>`).join('')}</div>`).join('')}</div>`;
 }
 
+// "More of this" / "less of this" for a topic area or category (Categories page and topic pages). w is the
+// topic's own setting; inh is what a category inherits from its area while it has none of its own.
+const topicCtl = (id, w, inh = 0) => `<span class="tw" data-topic="${id}" data-w="${w}">
+    <button class="${w > 0 ? 'on' : inh > 0 ? 'inh' : ''}" data-act="topic" data-w="1" title="More of this on Home and For You" aria-label="More of this" aria-pressed="${w > 0}">${I.add}</button>
+    <button class="${w < 0 ? 'on' : inh < 0 ? 'inh' : ''}" data-act="topic" data-w="-1" title="Less of this on Home and For You" aria-label="Less of this" aria-pressed="${w < 0}">${I.minus}</button></span>`;
+
 const SIDE_FOLLOWS = 8;             // sidebar shows this many followed channels, new uploads first
 function renderSide() {
   $('#sidemore').innerHTML = `
@@ -208,6 +224,7 @@ async function pageMix(p) {
         ${badges(v)}
         <div class="actions">
           <button class="pill solid" data-act="watch">${I.play} Watch</button>
+          ${laterPill(v)}
           <button class="pill ${v.watched ? 'on' : ''}" data-act="seen" title="${seenTitle(v.watched)}">${I.check}<span class="lbl">${seenLabel(v.watched)}</span></button>
           <button class="pill" data-act="list">${I.save} Save</button>
         </div>
@@ -234,22 +251,26 @@ async function pageBrowse(p, o = {}) {
   const d = await api('/videos?' + qs({ ...f, q, channel, area: cat ? '' : o.area, cat: o.cat, page }));
   let h = '', head, after = '';
   if (d.channel) {
+    pageTitle = channel;
     head = `<div class="avatar big">${initial(channel)}</div><h2>${esc(channel)}</h2>
-      ${followBtn(channel, d.channel.followed)}
+      ${followBtn(channel, d.channel.followed)}${d.channel.followed ? quietBtn(channel, d.channel.quiet, true) : ''}
       <a class="pill" href="https://www.youtube.com/results?search_query=${enc(channel)}" target="_blank" rel="noopener">${I.out} Find on YouTube</a>`;
   } else if (area) {
     h += `<div class="pagehead"><div class="crumb"><a href="#/categories">Categories</a>${cat ? ` &rsaquo; <a href="#/a/${area.id}">${esc(area.name)}</a>` : ''}</div></div>`;
-    head = `<h2>${esc(cat ? cat.name : area.name)}</h2>`;
+    pageTitle = cat ? cat.name : area.name;
+    head = `<h2>${esc(cat ? cat.name : area.name)}</h2>${cat ? topicCtl(cat.id, cat.w, area.w) : topicCtl(area.id, area.w)}`;
     if (!cat) after = `<div class="catwrap">${area.categories.map(c => `<a class="chip" href="#/c/${c.id}">${esc(c.name)}</a>`).join('')}</div>`;
   } else {
-    head = `<h2>${q ? `Results for &ldquo;${esc(q)}&rdquo;` : 'Browse'}</h2>`;
+    pageTitle = q || 'Browse';
+    head = `<h2>${q ? `Results for &ldquo;${esc(d.corrected || q)}&rdquo;` : 'Browse'}</h2>`;
   }
   const to = n => href(base, { q, ...f, page: n });
   const pager = d.pages > 1 ? `<div class="pager">${page > 1 ? `<a class="pill" href="${to(page - 1)}">Previous</a>` : ''}
       <span>Page ${d.page} of ${d.pages}</span>${page < d.pages ? `<a class="pill" href="${to(page + 1)}">Next</a>` : ''}</div>` : '';
   h += filterBar(base, { q }, f, `<span class="muted">${d.total.toLocaleString()} video${d.total === 1 ? '' : 's'}</span>`, head) + after
+    + (d.corrected ? `<p class="note">Nothing matches &ldquo;${esc(q)}&rdquo;, so these are the results for &ldquo;${esc(d.corrected)}&rdquo;.</p>` : '')
     + (f.sort === 'gems' ? '<p class="note">Hidden gems: recommended by several people, yet little watched on YouTube.</p>' : '')
-    + grid(d.items) + pager;
+    + (q && !d.items.length ? '<p class="empty">Nothing in the library or among your own videos matches that.</p>' : grid(d.items)) + pager;
   const yts = q && page === 1;   // general YouTube results under the first page of a search
   if (yts) h += `<section id="ytres" class="ytres"><h3>From YouTube</h3>${B.has_key
     ? '<p class="empty">Searching YouTube…</p>'
@@ -277,6 +298,7 @@ async function ytResults(q, len) {
 async function pageVideo(vid, autoplay) {
   const v = await api('/video/' + vid);
   CARDS[v.vid] = v;
+  pageTitle = ttl(v);
   let h = `<div class="watch"><div class="primary ${v.watched ? 'seen' : ''}" data-vid="${v.vid}">
     <div id="player" class="player"><a class="poster" href="#/v/${v.vid}?play=1" data-act="play" aria-label="Play video">
       ${timg(v, 'hqdefault', false)}<span class="play">${I.play}</span>${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}</a></div>
@@ -290,6 +312,7 @@ async function pageVideo(vid, autoplay) {
         <span class="rate"><button class="pill ${v.rating > 0 ? 'on' : ''}" data-act="like" title="I like this: recommend more like it">${I.like} Like</button><button
           class="pill ${v.rating < 0 ? 'on' : ''}" data-act="dislike" title="Not for me: recommend fewer like it" aria-label="Dislike">${I.dislike}</button></span>
         <button class="pill ${v.watched ? 'on' : ''}" data-act="seen" title="${seenTitle(v.watched)}">${I.check}<span class="lbl">${seenLabel(v.watched)}</span></button>
+        ${laterPill(v)}
         <button class="pill" data-act="list">${I.save} Save</button>
         <button class="pill" data-act="hide" title="Hide this video forever">${I.hide} Hide</button>
         <a class="pill" href="${esc(v.url)}" target="_blank" rel="noopener">${I.out} YouTube</a>
@@ -311,12 +334,24 @@ async function pageVideo(vid, autoplay) {
         <div class="foot"><a href="${esc(m.url)}" target="_blank" rel="noopener">in &ldquo;${esc(m.story)}&rdquo; &nearr;</a></div></div></div>`).join('')}</details>`;
   } else {
     h += `<div class="desc">${factLine(v) ? `<div class="top-line">${factLine(v)}</div>` : ''}
-      <p class="why" style="margin:0">This one comes from ${v.upload ? 'a channel you follow' : v.in_playlists.length ? 'one of your playlists' : 'a YouTube search'}.</p></div>`;
+      <p class="why" style="margin:0">This one comes from ${v.upload ? 'a channel you follow' : v.in_playlists.length ? 'one of your playlists' : 'a YouTube search'}.</p>
+      ${v.desc ? `<div class="ytdesc ${descLong(v.desc) ? 'clamp' : ''}">${descHtml(v.desc)}</div>
+        ${descLong(v.desc) ? '<button class="link" data-act="moredesc">Show more</button>' : ''}` : ''}</div>`;
   }
   h += '</div>';
   if (v.hn && v.related.length) h += `<div class="secondary"><h3>Related</h3>${v.related.map(compact).join('')}</div>`;
   main(h + '</div>');
   if (autoplay) startPlayer(v.vid);
+}
+
+// YouTube's description of a video from outside the library: links open in a new tab, and times ("12:34")
+// become buttons that jump the player there.
+const descLong = t => t.length > 400 || t.split('\n').length > 6;
+function descHtml(text) {
+  return esc(text)
+    .replace(/https?:\/\/[^\s<]*[^\s<.,;:!?)\]]/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`)
+    .replace(/(^|[\s(\[])((?:\d{1,2}:)?\d{1,2}:\d{2})(?=$|[\s)\],.])/gm, (m, pre, t) =>
+      `${pre}<button class="ts" data-act="seek" data-t="${t.split(':').reduce((a, x) => a * 60 + +x, 0)}">${t}</button>`);
 }
 
 // ---- embedded player. It is built to end: it asks once per sitting what you came for, hides the related
@@ -441,6 +476,12 @@ async function startPlayer(vid) {
 // closing the tab mid-video: hand the last position and seconds to the browser to deliver
 addEventListener('pagehide', () => { if (flushProgress) flushProgress(); });
 
+// Followed channels can be kept off the home page: still followed, still on Following and their own page.
+const quietTitle = q => q ? 'Kept off the home page. Click to let it back.' : 'Shown on the home page. Click to keep it off.';
+const quietBtn = (name, q, pill) => pill
+  ? `<button class="pill" data-act="quiet" data-ch="${esc(name)}" data-q="${q ? 1 : 0}" title="${quietTitle(q)}">${I.home} ${q ? 'Off Home' : 'On Home'}</button>`
+  : `<button class="quiet ${q ? 'off' : ''}" data-act="quiet" data-ch="${esc(name)}" data-q="${q ? 1 : 0}" title="${quietTitle(q)}" aria-label="${quietTitle(q)}">${I.home}</button>`;
+
 function channelRow(c, right) {
   return `<div class="r"><div class="avatar">${initial(c.name)}</div>
     <div class="name"><a href="#/channel/${enc(c.name)}"><b>${esc(c.name)}</b></a><div class="sub">${c.sub}</div></div>${right}</div>`;
@@ -478,6 +519,7 @@ async function pageFollowing(tab) {
           <a class="name" href="#/channel/${enc(c.name)}"><b>${esc(c.name)}</b>
             <span class="sub">${c.hn ? `${c.hn} in the library, ${c.unwatched} unwatched` : (c.checked ? 'Uploads only' : 'Not checked yet')}</span></a>
           ${c.new ? `<span class="new">${c.new} new</span>` : ''}
+          ${quietBtn(c.name, c.quiet)}
           <button class="unf" data-follow="${esc(c.name)}" data-on="1" title="Unfollow ${esc(c.name)}" aria-label="Unfollow ${esc(c.name)}">${I.close}</button></div>`).join('')}</div>
         <p class="empty" id="channone" hidden>No followed channel matches that.</p>`;
     } else {
@@ -518,8 +560,10 @@ async function pagePlaylists() {
 
 async function pagePlaylist(id) {
   const p = await api('/playlists/' + id);
+  pageTitle = p.name;
   let h = `<div class="pagehead headrow"><div><h2>${esc(p.name)}</h2><p class="sub">${p.done} of ${p.items.length} watched</p></div>
     <span class="progress"><i style="width:${p.items.length ? 100 * p.done / p.items.length : 0}%"></i></span><span style="flex:1"></span>
+    ${p.next && p.items.length > 12 ? `<button class="pill" data-act="jumpnext">${I.down} Up next</button>` : ''}
     ${p.yt_id ? `<button class="pill" data-act="plsync" data-id="${p.id}" ${B.has_key ? 'title="Add what is new on YouTube, drop what was removed there; your own changes here are kept"' : 'disabled title="Needs a YouTube API key"'}>${I.refresh} Sync with YouTube</button>
       <a class="pill" href="https://www.youtube.com/playlist?list=${esc(p.yt_id)}" target="_blank" rel="noopener">${I.out} On YouTube</a>` : ''}
     <button class="pill danger" data-act="delpl" data-id="${p.id}">${I.trash} Delete playlist</button></div>`;
@@ -529,7 +573,8 @@ async function pagePlaylist(id) {
   else h += `<ol class="plrows">${p.items.map((v, i) => {
     CARDS[v.vid] = v;
     const facts = factLine(v);
-    return `<li class="row ${v.watched ? 'seen' : ''} ${v.vid === p.next ? 'nextup' : ''}" data-vid="${v.vid}" data-pl="${p.id}">
+    return `<li class="row ${v.watched ? 'seen' : ''} ${v.vid === p.next ? 'nextup' : ''}" data-vid="${v.vid}" data-pl="${p.id}" draggable="true">
+      <span class="grip" title="Drag to reorder" aria-hidden="true">${I.grip}</span>
       <span class="num">${i + 1}</span>
       <div class="thumb"><a href="#/v/${v.vid}" tabindex="-1" aria-hidden="true">${timg(v)}${v.dur ? `<span class="dur">${fmtDur(v.dur)}</span>` : ''}</a></div>
       <div class="text">${vt(v)}
@@ -538,17 +583,32 @@ async function pagePlaylist(id) {
       <div class="tools">
         <button class="ibtn" data-act="watch" title="Play" aria-label="Play">${I.play}</button>
         <button class="ibtn ${v.watched ? 'on' : ''}" data-act="seen" title="${seenTitle(v.watched)}" aria-label="${seenTitle(v.watched)}">${I.check}</button>
-        <button class="ibtn" data-act="up" title="Move up" aria-label="Move up">${I.up}</button>
-        <button class="ibtn" data-act="down" title="Move down" aria-label="Move down">${I.down}</button>
+        <button class="ibtn" data-act="up" title="Move up (Shift-click: to the top)" aria-label="Move up">${I.up}</button>
+        <button class="ibtn" data-act="down" title="Move down (Shift-click: to the bottom)" aria-label="Move down">${I.down}</button>
         <button class="ibtn" data-act="unlist" title="Remove from playlist" aria-label="Remove from playlist">${I.close}</button>
       </div></li>`;
   }).join('')}</ol>`;
   main(h);
 }
 
+// "Today", "Yesterday", a weekday within the last week, then the month; '' (an imported row without a date) is "Earlier"
+function dayLabel(when) {
+  if (!when) return 'Earlier';
+  const d = new Date(when + 'T12:00'), now = new Date(B.today + 'T12:00'), days = Math.round((now - d) / 864e5);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'long' });
+  return d.toLocaleDateString(undefined, d.getFullYear() === now.getFullYear() ? { month: 'long' } : { month: 'long', year: 'numeric' });
+}
 async function pageHistory() {
   const d = await api('/history');
-  let h = `<div class="pagehead"><h2>History</h2></div>` + (d.items.length ? grid(d.items) : '<p class="empty">Nothing watched yet.</p>');
+  const groups = [];                // consecutive videos under the same label; the list comes newest first
+  for (const v of d.items) {
+    const label = dayLabel(v.when);
+    if (!groups.length || groups[groups.length - 1][0] !== label) groups.push([label, []]);
+    groups[groups.length - 1][1].push(v);
+  }
+  let h = `<div class="pagehead"><h2>History</h2></div>` + (groups.map(([label, items]) => `<h3 class="sechead">${esc(label)}</h3>${grid(items)}`).join('') || '<p class="empty">Nothing watched yet.</p>');
   if (d.hidden.length) h += `<h3 class="sechead">Hidden videos</h3><div class="rows">${d.hidden.map(v => `<div class="r plain" data-vid="${v.vid}">
     <div class="name">${esc(v.title)}</div><button class="pill" data-act="unhide">Bring back</button></div>`).join('')}</div>`;
   main(h);
@@ -557,10 +617,10 @@ async function pageHistory() {
 async function pageForYou(p) {
   const f = filterParams(p, ['len', 'type', 'area']);
   const d = await api('/foryou?' + qs(f));
-  let h = filterBar('#/foryou', {}, f, d.items.length ? `<span class="muted">from ${d.likes} like${d.likes === 1 ? '' : 's'} and your history</span>` : '', '<h2>For You</h2>');
+  let h = filterBar('#/foryou', {}, f, d.items.length ? `<span class="muted">from ${d.likes} like${d.likes === 1 ? '' : 's'}${d.topics ? ', your topics' : ''} and your history</span>` : '', '<h2>For You</h2>');
   if (d.items.length) h += grid(d.items);
-  else if (!d.likes && !d.watched) h += `<p class="empty">Nothing to go on yet. Like a few videos (the thumbs-up on a video's page, or the three-dot menu on any card) and recommendations will show up here.</p>`;
-  else h += '<p class="empty">No close matches. Like a few more videos, or remove a filter.</p>';
+  else if (!d.likes && !d.watched && !d.topics) h += `<p class="empty">Nothing to go on yet. Like a few videos (the thumbs-up on a video's page, or the three-dot menu on any card), mark the topics you want more of on <a class="link" href="#/categories">Categories</a>, or bring your YouTube history in from <a class="link" href="#/setup">Settings</a>.</p>`;
+  else h += '<p class="empty">No close matches. Like a few more videos, ask for more of a topic on <a class="link" href="#/categories">Categories</a>, or remove a filter.</p>';
   main(h);
 }
 
@@ -585,8 +645,8 @@ function pageCategories() {
       <a class="pill" href="#/browse">All videos</a>
     </div>
     <div class="areas">${B.areas.map(a => `<section class="areacard">
-      <a class="areaname" href="#/a/${a.id}">${esc(a.name)}<span class="count">${a.count}</span></a>
-      <div class="cats">${a.categories.map(c => `<a href="#/c/${c.id}">${esc(c.name)}<span class="count">${c.count}</span></a>`).join('')}</div>
+      <div class="areaname"><a href="#/a/${a.id}">${esc(a.name)}</a><span class="count">${a.count}</span>${topicCtl(a.id, a.w)}</div>
+      <div class="cats">${a.categories.map(c => `<div><a href="#/c/${c.id}">${esc(c.name)}</a><span class="count">${c.count}</span>${topicCtl(c.id, c.w, a.w)}</div>`).join('')}</div>
     </section>`).join('')}</div>
   </div>`);
 }
@@ -600,6 +660,17 @@ function pageSetup() {
     ${sw('calm', 'Calm presentation', 'No view counts, and no "new" dots or badges asking for attention. Uploads from followed channels still arrive in your queue.')}
     ${sw('hide_watched', 'Hide played videos', 'Watched videos disappear from the home page, Browse, search, channel pages and related videos instead of showing dimmed. History, Liked and playlists still list them.')}
     ${sw('dearrow', 'Video frames and plain titles (DeArrow)', 'Show a frame from the video instead of the uploader\'s thumbnail, and the community-written title from <a href="https://dearrow.ajay.app" target="_blank" rel="noopener">DeArrow</a> where one exists. Hover a title to see the original. Video ids are looked up on DeArrow\'s servers (by hash prefix).')}
+    <label class="setting"><span><b>Keep long uploads off Home</b><span>New videos from channels you follow that run longer than this stay on the Following page and never enter the home page queue. To keep one channel off Home altogether, use the house button next to it on Following.</span></span>
+      <select class="field" data-num="home_max_len" aria-label="Longest upload shown on Home">${[[0, 'No limit'], [3600, 'Over 1 hour'], [7200, 'Over 2 hours'], [10800, 'Over 3 hours']].map(([n, t]) => `<option value="${n}" ${B.home_max_len === n ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+    <h3 class="sechead">Your YouTube history</h3>
+    <p class="fine" style="margin-top:4px">From a Google Takeout export of &ldquo;YouTube and YouTube Music&rdquo;. The watch history (<code>history/watch-history.json</code> or <code>.html</code>) marks those videos as watched here and tells recommendations what you tend to watch. A playlist file of liked videos turns them into likes. Nothing leaves this computer.</p>
+    <div class="forms" style="margin-top:8px">
+      <label class="pill">Import watch history<input type="file" id="histfile" accept=".json,.html,application/json,text/html" hidden></label>
+      <label class="pill">Import liked videos<input type="file" id="likesfile" accept=".csv,text/csv" hidden></label>
+      ${B.imported.watched || B.imported.ratings ? `<button class="pill danger" data-act="forgetimport" title="Removes the ${B.imported.watched.toLocaleString()} watched marks and ${B.imported.ratings.toLocaleString()} likes that came from Takeout files. What you did in this app stays.">Take the import back</button>` : ''}
+    </div><div id="takeoutres"></div>
+    <h3 class="sechead">Keyboard</h3>
+    <p class="fine" style="margin-top:4px">Press <code>?</code> anywhere for the list of shortcuts.</p>
     <h3 class="sechead">YouTube API key</h3>
     <p class="fine" style="margin-top:4px">For durations, new uploads and playlist import.</p>
     <div class="stats">
@@ -660,9 +731,15 @@ async function pageDone() {
 const notFound = () => main('<div class="pagehead"><h2>Page not found</h2><p class="sub">There is nothing at this address. <a class="link" href="#/">Back to home</a></p></div>');
 const routeName = () => location.hash.replace(/^#\/?/, '').split(/[/?]/)[0];
 
+// The tab title: a page sets pageTitle for a name of its own (a video, a channel, a playlist); the rest are fixed.
+let pageTitle = '';
+const TITLES = { foryou: 'For You', categories: 'Categories', following: 'Following', playlists: 'Playlists', history: 'History', liked: 'Liked', review: 'Review', setup: 'Settings', done: 'Done for now' };
+
 async function route() {
   stopPlayer();
   closePopup();
+  pageTitle = '';
+  const slow = setTimeout(() => document.body.classList.add('loading'), 150);   // a thin bar, only when a page is slow to arrive
   document.body.classList.remove('drawer');
   const [path, qs = ''] = location.hash.replace(/^#\/?/, '').split('?');
   const p = Object.fromEntries(new URLSearchParams(qs));
@@ -692,6 +769,10 @@ async function route() {
   } catch (e) {
     main(`<p class="note err">${esc(e.message)}</p>`);
   }
+  clearTimeout(slow);
+  document.body.classList.remove('loading');
+  const title = pageTitle || TITLES[routeName()];
+  document.title = title ? `${title} · PersonalTube` : 'PersonalTube';
   dearrow();
 }
 
@@ -740,6 +821,14 @@ function markSeen(vid, on) {
     });
   });
 }
+function markLater(vid, on) {
+  if (CARDS[vid]) CARDS[vid].later = on;
+  document.querySelectorAll(`[data-vid="${vid}"] [data-act="later"]`).forEach(b => {
+    b.classList.toggle('on', on);
+    b.title = laterTitle(on);
+    if (b.hasAttribute('aria-label')) b.setAttribute('aria-label', laterTitle(on));
+  });
+}
 function markRated(vid, r) {
   if (CARDS[vid]) CARDS[vid].rating = r;
   document.querySelectorAll(`[data-vid="${vid}"]`).forEach(el => {
@@ -751,7 +840,10 @@ function markRated(vid, r) {
 const hidesWatched = () => B.settings.hide_watched && !/^#\/(v|playlist|history|liked|review|setup)/.test(location.hash);
 async function setWatched(vid, on) {
   const r = await api('/watched/' + vid, { watched: on });
-  if (on && hidesWatched()) { toast('Marked watched and hidden. Undo from History.'); return refresh(); }
+  if (on && hidesWatched()) {
+    toast('Marked watched and hidden.', async () => { await api('/watched/' + vid, { watched: false }); await refresh(); });
+    return refresh();
+  }
   markSeen(vid, on);
   await reboot().catch(() => { B.watched = r.watched; renderCounter(); });
 }
@@ -780,12 +872,16 @@ function menuPopup(vid, anchor, host) {
     <button class="mi" data-act="like">${I.like}<span>${r > 0 ? 'Remove like' : 'Like: more like this'}</span></button>
     <button class="mi" data-act="dislike">${I.dislike}<span>${r < 0 ? 'Remove dislike' : 'Dislike: fewer like this'}</span></button>
     <button class="mi" data-act="seen">${I.check}<span>${seenTitle(on)}</span></button>
+    <button class="mi" data-act="later">${I.clock}<span>${laterTitle(!!(CARDS[vid] && CARDS[vid].later))}</span></button>
     <button class="mi" data-act="list">${I.save}<span>Save to playlist</span></button>
     <button class="mi" data-act="hide">${I.hide}<span>Hide forever</span></button>`, vid, anchor, host);
 }
-function listPopup(vid, anchor, host) {
+// The picker ticks the playlists that already hold the video; clicking one adds or removes it and the picker stays.
+async function listPopup(vid, anchor, host) {
+  let ids = [];
+  try { ids = (await api('/playlists/of/' + vid)).ids; } catch { /* no ticks this time */ }
   openPopup(`<div class="mh">Save to playlist</div>
-    ${B.playlists.map(p => `<button class="mi" data-addto="${p.id}">${I.list}<span>${esc(p.name)}</span></button>`).join('') || '<div class="mnone">No playlists yet</div>'}
+    ${B.playlists.map(p => { const on = ids.includes(p.id); return `<button class="mi ${on ? 'in' : ''}" data-addto="${p.id}" role="menuitemcheckbox" aria-checked="${on}">${on ? I.check : I.list}<span>${esc(p.name)}</span></button>`; }).join('') || '<div class="mnone">No playlists yet</div>'}
     <form id="popnew"><input class="field" type="text" name="name" placeholder="New playlist" aria-label="New playlist name"><button class="pill">Add</button></form>`, vid, anchor, host);
 }
 
@@ -811,8 +907,13 @@ document.addEventListener('click', async e => {
       return reboot();
     }
     if (t.dataset.addto !== undefined) {
-      await api(`/playlists/${t.dataset.addto}/add`, { vid: pop.dataset.pv });
-      closePopup(); toast('Saved to playlist'); return reboot();
+      const on = !t.classList.contains('in'), pid = +t.dataset.addto, pv = pop.dataset.pv, at = popAnchor, ph = popHost;
+      await api(`/playlists/${pid}/${on ? 'add' : 'remove'}`, { vid: pv });
+      if (pid === B.watch_later) markLater(pv, on);
+      toast(on ? 'Saved to playlist' : 'Removed from playlist');
+      await reboot();
+      if (!pop.hidden && pop.dataset.pv === pv) await listPopup(pv, at, ph);
+      return;
     }
     switch (t.dataset.act) {
       case 'subsall': case 'subsnone': case 'subshn':
@@ -826,6 +927,69 @@ document.addEventListener('click', async e => {
         toast(`Following ${r.added} more channel${r.added === 1 ? '' : 's'}`);
         return refresh();
       }
+      case 'undo': {
+        const fn = toastUndo;
+        toastUndo = null; $('#toast').classList.remove('on', 'act');
+        if (fn) await fn();
+        return;
+      }
+      case 'later': {
+        const on = !(CARDS[vid] && CARDS[vid].later);
+        const set = async to => {
+          B.watch_later = (await api('/later/' + vid, { on: to })).id;
+          markLater(vid, to);
+          await (location.hash === '#/playlist/' + B.watch_later ? refresh() : reboot());
+        };
+        await set(on);
+        return toast(on ? 'Saved to Watch later' : 'Removed from Watch later', () => set(!on));
+      }
+      case 'topic': {
+        const box = t.closest('.tw'), id = box.dataset.topic, w = +box.dataset.w === +t.dataset.w ? 0 : +t.dataset.w;
+        await api('/topic', { id, w });
+        for (const a of B.areas) for (const x of [a, ...a.categories]) if (x.id === id) x.w = w;
+        toast(w > 0 ? 'More of this on Home and For You.' : w < 0 ? 'Less of this on Home and For You.' : 'Back to normal.');
+        return route();
+      }
+      case 'quiet': {
+        const quiet = t.dataset.q !== '1';
+        await api('/follow/quiet', { channel: t.dataset.ch, quiet });
+        toast(quiet ? `${t.dataset.ch} stays off the home page. Still on Following.` : `${t.dataset.ch} is back on the home page.`);
+        return route();
+      }
+      case 'seek': {
+        const secs = +t.dataset.t;
+        $('#player').scrollIntoView({ block: 'nearest' });
+        if (player && player.seekTo) { player.seekTo(secs, true); player.playVideo(); return; }
+        if (CARDS[vid]) CARDS[vid].resume = secs;
+        return startPlayer(vid);
+      }
+      case 'moredesc': {
+        const box = $('#main .ytdesc'), open = box.classList.toggle('clamp');
+        t.textContent = open ? 'Show more' : 'Show less';
+        return;
+      }
+      case 'jumpnext': { const li = $('#main .plrows .nextup'); if (li) li.scrollIntoView({ block: 'center' }); return; }
+      case 'closekeys': $('#keys').close(); return;
+      case 'histgo': {
+        t.disabled = true; t.textContent = 'Importing…';
+        const r = await api('/takeout/history/import', { token: t.dataset.token });
+        toast(`${r.added.toLocaleString()} video${r.added === 1 ? '' : 's'} marked as watched`);
+        return refresh();
+      }
+      case 'likesgo': {
+        t.disabled = true; t.textContent = 'Importing…';
+        const r = await api('/takeout/likes', { csv: likesCsv, apply: true });
+        toast(`${r.new.toLocaleString()} like${r.new === 1 ? '' : 's'} added`);
+        return refresh();
+      }
+      case 'forgetimport':
+        if (t.dataset.sure) {
+          const r = await api('/takeout/forget', {});
+          toast(`Took back ${r.watched.toLocaleString()} watched marks and ${r.ratings.toLocaleString()} likes`);
+          return refresh();
+        }
+        t.dataset.sure = 1; t.textContent = 'Really take it back? Click again';
+        return;
       case 'menu':
         e.stopPropagation();
         if (!pop.hidden && popAnchor === t) return closePopup();
@@ -852,7 +1016,7 @@ document.addEventListener('click', async e => {
       }
       case 'hide':
         await api('/hide/' + vid, { hidden: true });
-        toast('Hidden. Undo from the History page.');
+        toast('Hidden. It is listed at the end of History.', async () => { await api('/hide/' + vid, { hidden: false }); await route(); });
         if (location.hash.startsWith('#/v/')) history.back(); else if (host) host.remove();
         return;
       case 'unhide': await api('/hide/' + vid, { hidden: false }); return route();
@@ -907,9 +1071,19 @@ document.addEventListener('click', async e => {
         return refresh();
       }
       case 'up': case 'down':
-        await api(`/playlists/${host.dataset.pl}/move`, { vid, dir: t.dataset.act }); return route();
-      case 'unlist':
-        await api(`/playlists/${host.dataset.pl}/remove`, { vid }); return refresh();
+        await api(`/playlists/${host.dataset.pl}/move`, { vid, dir: e.shiftKey ? (t.dataset.act === 'up' ? 'top' : 'bottom') : t.dataset.act });
+        return route();
+      case 'unlist': {
+        const pl = host.dataset.pl, next = host.nextElementSibling, before = next ? next.dataset.vid : null;
+        await api(`/playlists/${pl}/remove`, { vid });
+        if (+pl === B.watch_later) markLater(vid, false);
+        toast('Removed from the playlist.', async () => {   // back where it was
+          await api(`/playlists/${pl}/add`, { vid });
+          await api(`/playlists/${pl}/move`, { vid, before });
+          await refresh();
+        });
+        return refresh();
+      }
       case 'delpl':
         if (t.dataset.sure) { await api('/playlists/' + t.dataset.id, undefined, 'DELETE'); await reboot(); location.hash = '#/playlists'; }
         else { t.dataset.sure = 1; t.textContent = 'Really delete? Click again'; }
@@ -918,6 +1092,7 @@ document.addEventListener('click', async e => {
   } catch (err) { fail(err); if (['refresh', 'plsync', 'plgo'].includes(t.dataset.act)) route(); }
 });
 
+let likesCsv = '';                  // the liked-videos file last previewed on Settings
 let takeout = [];                   // playlists offered in #plresults: from Takeout files (with vids) or a channel (without)
 const plCount = () => {
   const n = document.querySelectorAll('#plresults .plpick:checked').length;
@@ -974,6 +1149,34 @@ document.addEventListener('change', async e => {
       plCount();
     } catch (err) { fail(err); }
     e.target.value = '';
+    return;
+  }
+  if (e.target.id === 'histfile' || e.target.id === 'likesfile') {
+    const file = e.target.files[0], out = $('#takeoutres');
+    if (!file) return;
+    out.innerHTML = `<p class="note">Reading ${esc(file.name)}…</p>`;
+    try {
+      const n = x => x.toLocaleString(), row = (text, sub, btn) => `<div class="rows"><div class="r plain subhead"><div class="name"><b>${text}</b><div class="sub">${sub}</div></div>${btn}</div></div>`;
+      if (e.target.id === 'histfile') {     // the file goes up as it is: histories run to tens of megabytes
+        const r = await fetch('/api/takeout/history/preview', { method: 'POST', body: file });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : r.statusText);
+        out.innerHTML = row(`${n(d.videos)} videos in ${esc(file.name)}`,
+          `${d.first ? `${esc(d.first)} to ${esc(d.last)} &middot; ` : ''}${n(d.library)} are in the library &middot; ${n(d.new)} not marked watched here yet`,
+          d.new ? `<button class="pill solid" data-act="histgo" data-token="${esc(d.token)}">Mark ${n(d.new)} as watched</button>` : '<span class="muted">Already imported</span>');
+      } else {
+        likesCsv = await file.text();
+        const d = await api('/takeout/likes', { csv: likesCsv });
+        out.innerHTML = row(`${n(d.videos)} videos in ${esc(file.name)}`, `${n(d.new)} without a rating here yet &middot; ${n(d.library)} of those are in the library`,
+          d.new ? `<button class="pill solid" data-act="likesgo">Like ${n(d.new)} videos</button>` : '<span class="muted">Nothing new</span>');
+      }
+    } catch (err) { out.innerHTML = ''; fail(err); }
+    e.target.value = '';
+    return;
+  }
+  if (e.target.dataset.num) {
+    const k = e.target.dataset.num, n = +e.target.value;
+    try { await api('/settings', { [k]: n }); B[k] = n; toast('Saved.'); } catch (err) { fail(err); }
     return;
   }
   if (e.target.classList.contains('plpick')) return plCount();
@@ -1037,18 +1240,110 @@ $('#theme').addEventListener('click', () => {
   root.dataset.theme = dark ? 'light' : 'dark';
   try { localStorage.setItem('pt-theme', root.dataset.theme); } catch { /* ignore */ }
 });
+// ---- keyboard. j / k walk the videos on a page (focus moves to the title, so Enter opens it); the letter keys
+// act on the focused video, or on the video of a video page; "g" then a letter goes to a page. "?" lists them.
+const GO = { h: '#/', y: '#/foryou', b: '#/browse', c: '#/categories', f: '#/following', p: '#/playlists', l: '#/liked', i: '#/history', r: '#/review', s: '#/setup' };
+const KEY_ACT = { w: 'later', m: 'seen', l: 'like', p: 'watch' };
+let goAt = 0;
+// run a data-act on a video as if a button inside its card had been clicked
+function runAct(act, host) {
+  const b = document.createElement('button');
+  b.dataset.act = act; b.hidden = true;
+  host.appendChild(b); b.click(); b.remove();
+}
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') { closePopup(); document.body.classList.remove('drawer'); return; }
-  if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) {
-    e.preventDefault(); $('#search input').focus();
+  const el = document.activeElement, k = e.key;
+  if (e.ctrlKey || e.metaKey || e.altKey || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || $('#keys').open) return;
+  if (k === '/') { e.preventDefault(); $('#search input').focus(); return; }
+  if (k === '?') { $('#keys').showModal(); return; }
+  if (Date.now() - goAt < 1500) {
+    goAt = 0;
+    if (GO[k] !== undefined) { e.preventDefault(); location.hash = GO[k]; return; }
+  }
+  if (k === 'g') { goAt = Date.now(); return; }
+  if (k === 'j' || k === 'k') {
+    const all = [...document.querySelectorAll('#main a.vt')].filter(a => a.offsetParent);
+    if (!all.length) return;
+    let i = all.indexOf(el);
+    if (i < 0) i = Math.max(0, all.findIndex(a => a.getBoundingClientRect().bottom > 64)) - (k === 'j' ? 1 : 0);   // start at the first one in view
+    const to = all[Math.max(0, Math.min(all.length - 1, i + (k === 'j' ? 1 : -1)))];
+    to.focus({ preventScroll: true });
+    (to.closest('[data-vid]') || to).scrollIntoView({ block: 'nearest' });
+    return;
+  }
+  const onVideo = routeName() === 'v', host = el.closest('#main [data-vid]') || (onVideo && $('#main .primary[data-vid]'));
+  if (onVideo && el === document.body) {      // the player, while nothing else has the focus
+    if (k === ' ') {
+      e.preventDefault();
+      if (!player || !player.getPlayerState) return host && startPlayer(host.dataset.vid);
+      return player.getPlayerState() === 1 ? player.pauseVideo() : player.playVideo();
+    }
+    if ((k === 'ArrowLeft' || k === 'ArrowRight') && player && player.seekTo) {
+      e.preventDefault();
+      return player.seekTo(Math.max(0, player.getCurrentTime() + (k === 'ArrowLeft' ? -10 : 10)), true);
+    }
+  }
+  if (!host) return;
+  if (k === 's') { e.preventDefault(); return listPopup(host.dataset.vid, el === document.body ? $('[data-act="list"]', host) || host : el, host); }
+  if (KEY_ACT[k]) {
+    e.preventDefault();
+    if (k === 'p' && onVideo && host.classList.contains('primary')) return startPlayer(host.dataset.vid);
+    runAct(KEY_ACT[k], host);
   }
 });
+$('#keys').addEventListener('click', e => { if (e.target.id === 'keys') e.target.close(); });   // a click on the backdrop
+
+// ---- reordering a playlist by dragging a row's handle
+let dragVid = null, onGrip = false;
+const dropMarks = () => document.querySelectorAll('.dropbefore, .dropafter, .dragging').forEach(x => x.classList.remove('dropbefore', 'dropafter', 'dragging'));
+document.addEventListener('mousedown', e => { onGrip = !!e.target.closest('.grip'); });
+document.addEventListener('dragstart', e => {
+  const li = e.target.closest && e.target.closest('.plrows li');
+  if (!li) return;
+  if (!onGrip) { e.preventDefault(); return; }
+  dragVid = li.dataset.vid;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', dragVid);
+  setTimeout(() => li.classList.add('dragging'));
+});
+document.addEventListener('dragover', e => {
+  const li = dragVid && e.target.closest && e.target.closest('.plrows li');
+  if (!li) return;
+  e.preventDefault();
+  const r = li.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2;
+  document.querySelectorAll('.dropbefore, .dropafter').forEach(x => x.classList.remove('dropbefore', 'dropafter'));
+  if (li.dataset.vid !== dragVid) li.classList.add(after ? 'dropafter' : 'dropbefore');
+});
+document.addEventListener('drop', async e => {
+  const li = dragVid && e.target.closest && e.target.closest('.plrows li');
+  if (!li) return;
+  e.preventDefault();
+  const vid = dragVid, after = li.classList.contains('dropafter');
+  const next = after ? li.nextElementSibling : li, before = next ? next.dataset.vid : null;
+  dragVid = null; dropMarks();
+  if (li.dataset.vid === vid || before === vid) return;
+  try { await api(`/playlists/${li.dataset.pl}/move`, { vid, before }); await route(); } catch (err) { fail(err); }
+});
+document.addEventListener('dragend', () => { dragVid = null; dropMarks(); });
 
 document.addEventListener('input', e => {
   if (e.target.id === 'chanfilter') { chanFilter = e.target.value; applyChanFilter(); }
 });
 
-window.addEventListener('hashchange', () => { scrollTo(0, 0); route(); });
+// Scroll positions are kept per history entry, so Back returns to where you were on a long page and a new page
+// starts at the top (once it has arrived, not before). Without the Navigation API every page starts at the top.
+try { history.scrollRestoration = 'manual'; } catch { /* old browser */ }
+const SCROLLS = new Map();
+const navKey = () => (window.navigation && navigation.currentEntry && navigation.currentEntry.key) || null;
+let curKey = navKey();
+addEventListener('scroll', () => { if (curKey) SCROLLS.set(curKey, scrollY); }, { passive: true });
+window.addEventListener('hashchange', async () => {
+  curKey = navKey();
+  const y = (curKey && SCROLLS.get(curKey)) || 0;
+  await route();
+  scrollTo(0, y);
+});
 
 (async () => {
   try {

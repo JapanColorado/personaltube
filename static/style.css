@@ -144,9 +144,19 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
 .areas { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .areacard { background: var(--bg2); border-radius: 12px; padding: 14px 16px; }
 .areaname { display: flex; align-items: center; font-weight: 600; font-size: 16px; margin-bottom: 6px; }
-.areacard .count { margin-left: auto; padding-left: 8px; color: var(--muted); font-size: 12px; font-weight: 400; }
-.cats a { display: flex; align-items: center; padding: 4px 0; color: var(--muted); font-size: 14px; }
-.cats a:hover, .areaname:hover { color: var(--text); text-decoration: underline; }
+.areacard .count { margin-left: auto; padding: 0 8px; color: var(--muted); font-size: 12px; font-weight: 400; }
+.cats > div { display: flex; align-items: center; color: var(--muted); font-size: 14px; }
+.cats a { padding: 4px 0; min-width: 0; }
+.cats a:hover, .areaname a:hover { color: var(--text); text-decoration: underline; }
+/* more of this / less of this: two small buttons, faint until pointed at or set */
+.tw { display: inline-flex; flex: none; gap: 2px; }
+.tw button { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); opacity: .4; }
+.tw button svg { width: 16px; height: 16px; }
+.tw button:hover, .tw button:focus-visible { opacity: 1; background: var(--bg3); color: var(--text); }
+.tw button.inh { opacity: .8; color: var(--text); }
+.tw button.on { opacity: 1; background: var(--chip-on); color: var(--chip-on-text); }
+.filterbar .tw button { width: 30px; height: 30px; }
+.filterbar .tw button svg { width: 20px; height: 20px; }
 
 /* ---------------------------------------------------------------- video cards */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 40px 16px; padding-top: 16px; }
@@ -159,8 +169,11 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
 .tbtn { position: absolute; top: 6px; right: 6px; width: 30px; height: 30px; border-radius: 4px;
         background: rgba(0,0,0,.8); color: #fff; display: none; place-items: center; }
 .tbtn svg { width: 20px; height: 20px; }
-.thumb:hover .tbtn, .tbtn:focus-visible { display: grid; }
+.tbtn.later { right: 42px; }
+.tbtn.on { color: #3ea6ff; }
+.thumb:hover .tbtn, .thumb:focus-within .tbtn, .tbtn:focus-visible { display: grid; }
 @media (hover: none) { .thumb:hover .tbtn { display: none; } }
+.card, .next, .plrows li, .lead { scroll-margin: 72px 0 16px; }
 .seen .thumb img { opacity: .55; }
 .seen .thumb::after { content: "Watched"; position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,.8);
                       color: #fff; font-size: 12px; font-weight: 500; padding: 1px 6px; border-radius: 4px; pointer-events: none; }
@@ -194,6 +207,7 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
 .tprog { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255,255,255,.35); pointer-events: none; }
 .tprog i { display: block; height: 100%; background: var(--accent); }
 .via.branch { color: var(--accent); }
+.via.own, .via.topic { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 /* compact rows: related videos, playlist entries */
@@ -233,6 +247,12 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
 .desc .top-line.muted { font-weight: 400; }
 .desc p { margin: 0 0 10px; }
 .desc .why { color: var(--muted); }
+/* YouTube's own description of a video from outside the library */
+.ytdesc { margin-top: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ytdesc.clamp { max-height: 100px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
+.ytdesc a, .ytdesc .ts { color: var(--good); }
+.ytdesc a:hover, .ytdesc .ts:hover { text-decoration: underline; }
+.desc > .link { margin-top: 6px; font-weight: 500; }
 .desc .tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag { font-size: 12px; line-height: 18px; padding: 2px 8px; border-radius: 6px; background: var(--bg3); }
 a.tag { font-weight: 500; }
@@ -308,6 +328,12 @@ a.tag:hover { background: var(--chip-on); color: var(--chip-on-text); }
 .plrows li:hover { background: var(--hover); }
 .plrows li.nextup { background: var(--bg2); }
 .plrows .num { width: 24px; flex: none; text-align: right; color: var(--muted); align-self: center; }
+.plrows .grip { align-self: center; flex: none; display: grid; color: var(--muted); opacity: .35; cursor: grab; margin-right: -8px; }
+.plrows .grip svg { width: 20px; height: 20px; }
+.plrows li:hover .grip { opacity: 1; }
+.plrows li.dragging { opacity: .4; }
+.plrows li.dropbefore { box-shadow: 0 -2px 0 var(--accent); }
+.plrows li.dropafter { box-shadow: 0 2px 0 var(--accent); }
 .plrows .thumb { width: 200px; flex: none; border-radius: 8px; }
 .plrows .text { flex: 1; min-width: 0; }
 .plrows .tools { display: flex; flex: none; align-self: center; }
@@ -330,6 +356,7 @@ a.tag:hover { background: var(--chip-on); color: var(--chip-on-text); }
 .setting { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 16px; margin-top: 12px;
            background: var(--bg2); border-radius: 12px; cursor: pointer; }
 .setting b { display: block; font-weight: 500; }
+.setting select { flex: none; padding: 0 10px; cursor: pointer; }
 .setting span span { display: block; color: var(--muted); font-size: 13px; line-height: 1.45; margin-top: 2px; }
 .switch { appearance: none; flex: none; width: 40px; height: 22px; border-radius: 11px; background: var(--bg3); position: relative;
           margin: 0; cursor: pointer; transition: background .15s; }
@@ -361,6 +388,27 @@ pre { font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; background
          border-radius: 8px; max-width: calc(100vw - 48px); opacity: 0; transform: translateY(8px);
          transition: opacity .15s, transform .15s; pointer-events: none; }
 #toast.on { opacity: 1; transform: none; }
+#toast.on.act { pointer-events: auto; }
+#toast button { margin-left: 16px; font-weight: 500; color: #7cc4ff; }
+#toast button:hover { text-decoration: underline; }
+#popup .mi.in svg { color: var(--good); }
+
+/* a thin bar along the top while a page is slow to arrive */
+body.loading::before { content: ""; position: fixed; inset: 0 0 auto 0; height: 2px; z-index: 50; background: var(--accent);
+                       transform-origin: left; animation: loadbar 1.2s ease-in-out infinite; }
+@keyframes loadbar { 0% { transform: scaleX(0); } 60% { transform: scaleX(.8); } 100% { transform: scaleX(1); opacity: 0; } }
+
+/* the list of keyboard shortcuts ("?") */
+#keys { border: 1px solid var(--line); border-radius: 16px; padding: 20px 24px; background: var(--bg); color: var(--text);
+        box-shadow: var(--shadow); max-width: min(560px, calc(100vw - 32px)); }
+#keys::backdrop { background: rgba(0,0,0,.4); }
+#keys h3 { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+#keys dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0 0 12px; }
+#keys dt { white-space: nowrap; }
+#keys dd { margin: 0; color: var(--muted); line-height: 22px; }
+#keys .fine { margin-bottom: 16px; }
+kbd { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg2); border: 1px solid var(--bg3);
+      border-radius: 4px; padding: 1px 5px; color: var(--text); }
 
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 1100px) {
@@ -394,6 +442,7 @@ pre { font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; background
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
+  body.loading::before { animation: none; }
 }
 
 /* subscription and playlist import review lists */
@@ -422,5 +471,12 @@ label.pill, label.r { cursor: pointer; }
 .chlist .new { flex: none; font-size: 12px; font-weight: 500; color: var(--good); }
 .chlist .unf { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); opacity: .45; }
 .chlist .ch:hover .unf, .chlist .unf:focus-visible { opacity: 1; }
+/* the house: is this channel allowed on the home page? */
+.chlist .quiet { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; color: var(--muted); opacity: .45; }
+.chlist .quiet svg { width: 18px; height: 18px; }
+.chlist .ch:hover .quiet, .chlist .quiet:focus-visible { opacity: 1; }
+.chlist .quiet:hover { background: var(--bg3); }
+.chlist .quiet.off { opacity: 1; color: var(--bad); position: relative; }
+.chlist .quiet.off::after { content: ""; position: absolute; width: 22px; height: 2px; background: currentColor; transform: rotate(-45deg); border-radius: 1px; }
 .chlist .unf:hover { background: var(--bg3); color: var(--bad); }
 .chlist .unf svg { width: 18px; height: 18px; }

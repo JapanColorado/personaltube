@@ -1,6 +1,8 @@
 """PersonalTube: a local, personal video front page that works for the viewer.  Run with:  pixi run start"""
 import csv
+import difflib
 import hashlib
+import html
 import io
 import json
 import math
@@ -21,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import uvicorn
 import ytkey
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -55,6 +57,8 @@ DEARROW_TTL = 7 * 86400   # re-ask DeArrow for a video's title/frame after this 
 YT_SEARCH_FRESH = 86400   # a repeated search reuses YouTube's answer for a day (each real search costs 100 quota units)
 YT_SEARCH_KEEP = 30 * 86400  # after this long a search and the results nobody touched are forgotten
 YT_SEARCH_SHOW = 24
+TOPIC_MORE, TOPIC_LESS = 4.0, 0.1  # mix weight of a topic the user asked for more of / less of
+HOME_MAX_LEN_CHOICES = (0, 3600, 7200, 10800)  # "uploads longer than this stay off the home page"; 0 is no limit
 UA = "Mozilla/5.0 (compatible; local-video-app)"
 
 # ---------------------------------------------------------------- dataset
@@ -71,13 +75,45 @@ for _v in VIDEOS:
         DUPES.add(_v["vid"])
     _seen.add(_k)
 
+
+
+def words(s):
+    return re.findall(r"\w+", (s or "").casefold())
+
+
+# Search matches whole words and word beginnings ("rust" finds Rust and rustc, not "trust"), and ranks by where
+# the words were found: title, then channel, then topic and tags. WORDS holds those three word sets per video and
+# the title as one normalised string (for the bonus when the query appears in it as a phrase).
 BY_CHANNEL = defaultdict(list)
-BLOB = {}
+WORDS, BLOB, VOCAB = {}, {}, Counter()
+SCORE_MAX = max(_v["score"] for _v in VIDEOS) or 1
 for _v in VIDEOS:
     BY_CHANNEL[_v["channel"]].append(_v["vid"])
-    BLOB[_v["vid"]] = " ".join([_v["title"], _v["channel"], _v.get("primary_topic") or "",
-                                " ".join(_v.get("tags") or []),
-                                " ".join(c["name"] for c in _v["categories"])]).lower()
+    _t, _ch = words(_v["title"]), words(_v["channel"])
+    _o = words(" ".join([_v.get("primary_topic") or "", " ".join(_v.get("tags") or []),
+                         " ".join(c["name"] for c in _v["categories"])]))
+    WORDS[_v["vid"]] = (frozenset(_t), frozenset(_ch), frozenset(_o), " ".join(_t))
+    BLOB[_v["vid"]] = " ".join(_t + _ch + _o)   # quick pre-check: a word that matches is a substring of this
+    VOCAB.update(set(_t + _ch + _o))
+FIELD_WEIGHT = (3.0, 2.0, 1.0)
+
+
+def relevance(toks, fields):
+    """How well a video matches every word of a query; 0 when some word matches nowhere."""
+    total = 0.0
+    for t in toks:
+        best = 0.0
+        for ws, fw in zip(fields, FIELD_WEIGHT):
+            if t in ws:
+                best = max(best, fw)
+            elif fw * 0.7 > best and len(t) > 1 and any(w.startswith(t) for w in ws):
+                best = fw * 0.7
+        if not best:
+            return 0.0
+        total += best
+    if len(toks) > 1 and " ".join(toks) in fields[3]:
+        total += 2.0
+    return total
 
 RELATED = {}
 for _line in open(ROOT / "related.jsonl", encoding="utf-8"):
@@ -169,6 +205,8 @@ create table if not exists ytsearch(q text primary key, vids text, ts real);
 create table if not exists progress(vid text primary key, pos real, dur real, ts real);
 create table if not exists watchlog(day text, vid text, secs real, primary key(day, vid));
 create table if not exists intents(ts real, intent text);
+create table if not exists topics(id text primary key, w integer);
+create table if not exists descs(vid text primary key, text text, ts real);
 """
 
 
@@ -190,6 +228,11 @@ with db() as _c:
     if "yt_seen" not in {r[1] for r in _c.execute("pragma table_info(playlists)")}:
         # JSON list of the video ids the YouTube playlist held when it was last imported or synced
         _c.execute("alter table playlists add column yt_seen text")
+    if "quiet" not in {r[1] for r in _c.execute("pragma table_info(follows)")}:
+        _c.execute("alter table follows add column quiet integer default 0")  # 1: followed, but kept off the home page
+    for _t in ("watched", "ratings"):  # src='takeout' marks rows that came from a Takeout import, so it can be undone
+        if "src" not in {r[1] for r in _c.execute(f"pragma table_info({_t})")}:
+            _c.execute(f"alter table {_t} add column src text")
 
 
 def kv_get(c, k, default=None):
@@ -199,6 +242,21 @@ def kv_get(c, k, default=None):
 
 def kv_set(c, k, v):
     c.execute("insert into kv(k, v) values(?, ?) on conflict(k) do update set v=excluded.v", (k, str(v)))
+
+
+def later_id(c, create=False):
+    """The id of the playlist that the one-click "Watch later" button fills: the one remembered in kv, else the
+    one named "Watch later", else (only when asked to create it) a new one."""
+    saved = to_int(kv_get(c, "watch_later"))
+    if saved and c.execute("select 1 from playlists where id=?", (saved,)).fetchone():
+        return saved
+    r = c.execute("select id from playlists where lower(name)='watch later' order by ts").fetchone()
+    pid = r[0] if r else None
+    if not pid and create:
+        pid = c.execute("insert into playlists(name, ts) values('Watch later', ?)", (time.time(),)).lastrowid
+    if pid:
+        kv_set(c, "watch_later", pid)
+    return pid
 
 
 class State:
@@ -211,6 +269,16 @@ class State:
         self.settings = {k: kv_get(c, k, "1" if on else "0") == "1" for k, on in SETTINGS.items()}
         self.progress = {r["vid"]: dict(r) for r in c.execute("select * from progress")}  # started, not finished
         self.hide_watched = self.settings["hide_watched"]
+        self.quiet = {r[0] for r in c.execute("select channel from follows where quiet=1")}
+        self.home_max_len = to_int(kv_get(c, "home_max_len")) or 0
+        self.topics = {r[0]: r[1] for r in c.execute("select id, w from topics")}  # area or category id -> 1 more, -1 less
+        self.in_pl = {}  # vid -> (id, name) of the oldest playlist that holds it
+        for r in c.execute("select i.vid, p.id, p.name from items i join playlists p on p.id=i.playlist_id "
+                           "order by p.ts desc"):
+            self.in_pl[r[0]] = (r[1], r[2])
+        self.later_id = later_id(c)
+        self.later = ({r[0] for r in c.execute("select vid from items where playlist_id=?", (self.later_id,))}
+                      if self.later_id else set())
         self.da = {}  # vid -> DeArrow title/frame, only what is cached and fresh; the frontend asks for the rest
         if self.settings["dearrow"]:
             self.da = {r["vid"]: {"title": r["title"], "time": r["time"], "original": bool(r["original"])}
@@ -249,6 +317,7 @@ def card(vid, st):
     d["watched"] = vid in st.watched
     d["followed"] = d["channel"] in st.follows
     d["rating"] = st.ratings.get(vid, 0)
+    d["later"] = vid in st.later
     pr = st.progress.get(vid)
     if pr and not d["watched"]:
         d["resume"] = int(pr["pos"])
@@ -307,7 +376,8 @@ def fetch_video_info(vids):
                              "dur": parse_dur(it["contentDetails"].get("duration")) or 0,
                              "pub": sn["publishedAt"][:10],
                              "views": to_int(it.get("statistics", {}).get("viewCount")),
-                             "live": sn.get("liveBroadcastContent", "none") != "none"}
+                             "live": sn.get("liveBroadcastContent", "none") != "none",
+                             "desc": sn.get("description") or ""}
     return out
 
 
@@ -317,6 +387,8 @@ def add_extra(c, vid, info, upload=0, channel=None):
               "views=coalesce(excluded.views, views)",
               (vid, info["title"], channel or info["channel"], info["cid"], info["dur"], info["pub"], upload,
                info.get("views")))
+    if info.get("desc") is not None:
+        c.execute("insert or replace into descs(vid, text, ts) values(?,?,?)", (vid, info["desc"], time.time()))
 
 
 def learn_videos(c, vids):
@@ -421,13 +493,13 @@ def taste(st):
     Affinity is the best rescaled similarity to a liked video (watched ones count WATCH_WEIGHT), plus a bonus
     for sharing HN recommenders with a like or coming from a liked channel, minus closeness to a dislike."""
     global _taste_cache
-    sig = (tuple(sorted(st.ratings.items())), tuple(sorted(st.watched)))
+    sig = (tuple(sorted(st.ratings.items())), tuple(sorted(v for v in st.watched if v in EMB_ROW)))
     if _taste_cache[0] == sig:
         return _taste_cache[1]
     likes = [v for v, r in st.ratings.items() if r > 0]
     dislikes = [v for v, r in st.ratings.items() if r < 0 and v in EMB_ROW]
-    seen = sorted((v for v in st.watched if v not in st.ratings), key=st.watched.get, reverse=True)[:150]
-    pos = [(v, 1.0, "liked") for v in likes if v in EMB_ROW] + [(v, WATCH_WEIGHT, "watched") for v in seen if v in EMB_ROW]
+    seen = sorted((v for v in st.watched if v not in st.ratings and v in EMB_ROW), key=st.watched.get, reverse=True)[:150]
+    pos = [(v, 1.0, "liked") for v in likes if v in EMB_ROW] + [(v, WATCH_WEIGHT, "watched") for v in seen]
 
     def sims(vids):
         return (EMB @ EMB[[EMB_ROW[v] for v in vids]].T - SIM_FLOOR) / SIM_SPAN
@@ -475,6 +547,34 @@ def taste_reason(t, vid, weak=True):
     return {"kind": "taste", "text": f"{lead}: {title}", "vid": source}
 
 
+def topic_weight(vid, st):
+    """-1..1: how much the user asked for more or less of this video's topics on the Categories page. A setting on
+    a category overrides the one on its area; the video's first category counts double."""
+    if not st.topics or vid not in V:
+        return 0.0
+    tot = n = 0
+    for i, c in enumerate(V[vid]["categories"]):
+        w = st.topics.get(c["id"])
+        if w is None:
+            w = st.topics.get(c["area"], 0)
+        k = 1 if i else 2
+        tot, n = tot + k * w, n + k
+    return tot / n if n else 0.0
+
+
+def topic_pull(tw):
+    return TOPIC_MORE ** tw if tw >= 0 else TOPIC_LESS ** -tw
+
+
+def topic_reason(vid, st):
+    for c in V[vid]["categories"]:
+        if st.topics.get(c["id"], 0) > 0:
+            return {"kind": "topic", "text": f"You asked for more: {c['name']}", "cat": c["id"]}
+        if st.topics.get(c["area"], 0) > 0 and st.topics.get(c["id"]) is None:
+            return {"kind": "topic", "text": f"You asked for more: {c['area_name']}", "area": c["area"]}
+    return None
+
+
 def today_tally(c):
     """What has been played today: seconds of playback and how many videos got at least a minute of it."""
     r = c.execute("select coalesce(sum(secs), 0), coalesce(sum(secs >= 60), 0) from watchlog where day=?",
@@ -517,10 +617,13 @@ def build_mix(c, area="", cat="", length="", types=None):
         if nxt and nxt not in used and nxt not in reasons and passes(nxt, st, **flt):
             reasons[nxt] = {"kind": "next", "text": f"Next in: {p['name']}", "playlist": p["id"]}
             nexts.append(nxt)
-    nexts = sorted(nexts, key=lambda v: rnd(seed + "pl", v))[:HOME_PLAYLISTS]
+    # "Watch later" is the queue filled one click at a time, so its next video is always among them
+    nexts = sorted(nexts, key=lambda v: (reasons[v]["playlist"] != st.later_id, rnd(seed + "pl", v)))[:HOME_PLAYLISTS]
 
     # 2. Queue, part two: uploads from followed channels, recent ones first, one per channel.
-    ups = [e for e in st.extra.values() if e["upload"] and e["channel"] in st.follows
+    # (not from channels the user keeps off the home page, and not longer than the limit set in Settings)
+    ups = [e for e in st.extra.values() if e["upload"] and e["channel"] in st.follows and e["channel"] not in st.quiet
+           and not (st.home_max_len and (e["dur"] or 0) > st.home_max_len)
            and e["vid"] not in done and e["vid"] not in used and e["vid"] not in reasons and passes(e["vid"], st, **flt)]
     ups.sort(key=lambda e: (not st.is_new(e["vid"]), rnd(seed + "up", e["vid"])))
     uploads, chans = [], set()
@@ -537,17 +640,18 @@ def build_mix(c, area="", cat="", length="", types=None):
     used |= set(queue)
 
     # 3. Picked for you: score-weighted sampling; followed channels get up to ~30% of the weight, and videos
-    #    close to the user's likes weigh up to 15x more (close to dislikes: down to 0.2x).
+    #    close to the user's likes weigh up to 15x more (close to dislikes: down to 0.2x). Topics the user asked
+    #    for more of weigh TOPIC_MORE times more, those they asked for less of TOPIC_LESS.
     types = types or DEFAULT_TYPES
     cands = []
     for v in VIDEOS:
         vid = v["vid"]
         if (vid in done or vid in DUPES or vid in used or v["shelf_life"] == "news"
-                or v["hn"]["recommenders"] == 0 or META.get(vid, {}).get("gone")
+                or v["hn"]["recommenders"] == 0 or META.get(vid, {}).get("gone") or v["channel"] in st.quiet
                 or not passes(vid, st, types=types, **flt)):
             continue
         pull = min(15.0, max(0.2, math.exp(TASTE_PULL * tst["aff"].get(vid, 0))))
-        cands.append((vid, v["score"] ** 1.5 * pull, v["channel"] in st.follows))
+        cands.append((vid, v["score"] ** 1.5 * pull * topic_pull(topic_weight(vid, st)), v["channel"] in st.follows))
     w_f = sum(w for _, w, f in cands if f)
     w_r = sum(w for _, w, f in cands if not f)
     share = min(0.3, 0.08 * len(st.follows))
@@ -567,6 +671,8 @@ def build_mix(c, area="", cat="", length="", types=None):
             reasons[vid] = {"kind": "following", "text": "You follow this channel"}
         elif tst["aff"].get(vid, 0) >= 0.4 and taste_reason(tst, vid, weak=False):
             reasons[vid] = taste_reason(tst, vid, weak=False)
+        elif topic_weight(vid, st) > 0 and topic_reason(vid, st):
+            reasons[vid] = topic_reason(vid, st)
     used |= set(picks)
 
     # 4. Branch out: good videos the taste model does not lean towards, from the topic areas the user has
@@ -577,7 +683,8 @@ def build_mix(c, area="", cat="", length="", types=None):
                              if v in V)
         far = []
         for vid, _, followed in cands:
-            if followed or vid in used or tst["aff"].get(vid, 0) > BRANCH_MAX_AFFINITY:
+            if (followed or vid in used or tst["aff"].get(vid, 0) > BRANCH_MAX_AFFINITY
+                    or topic_weight(vid, st) < 0):  # "less of this" is not a place to branch out to
                 continue
             w = V[vid]["score"] ** 1.5 / (1 + seen_areas[primary_area(vid)[0]]) ** 2
             far.append((rnd(seed + "br", vid) ** (1 / w), vid))
@@ -622,8 +729,9 @@ def boot():
                 area_n[a] += 1
             for x in v["categories"]:
                 cat_n[x["id"]] += 1
-        areas = [{"id": a["id"], "name": a["name"], "count": area_n[a["id"]],
-                  "categories": [{"id": x["id"], "name": x["name"], "count": cat_n[x["id"]]}
+        areas = [{"id": a["id"], "name": a["name"], "count": area_n[a["id"]], "w": st.topics.get(a["id"], 0),
+                  "categories": [{"id": x["id"], "name": x["name"], "count": cat_n[x["id"]],
+                                  "w": st.topics.get(x["id"], 0)}
                                  for x in a["categories"]]} for a in TAXONOMY["areas"]]
         new_by = Counter(e["channel"] for e in st.extra.values() if st.is_new(e["vid"]))
         pls = []
@@ -636,8 +744,10 @@ def boot():
                 "default_types": sorted(DEFAULT_TYPES),
                 "has_meta": sum(1 for m in META.values() if m.get("dur")),
                 "has_key": bool(os.environ.get("YOUTUBE_API_KEY")),
-                "total": len(VIDEOS), "watched": len(st.watched),
-                "settings": st.settings,
+                "total": len(VIDEOS), "watched": sum(v in V for v in st.watched),
+                "settings": st.settings, "home_max_len": st.home_max_len, "watch_later": st.later_id,
+                "imported": {t: c.execute(f"select count(*) from {t} where src='takeout'").fetchone()[0]
+                             for t in ("watched", "ratings")},
                 "follows": [{"name": n, "new": new_by[n]} for n in sorted(st.follows, key=str.lower)],
                 "playlists": pls, "today": date.today().isoformat(), "tally": today_tally(c)}
 
@@ -673,52 +783,130 @@ def random_video():
 GEM_MIN_RECS, GEM_MAX_VIEWS = 2, 250_000  # a hidden gem: several HN recommenders, few YouTube views
 
 
+def own_extra(e, st):
+    """Is this video from outside the library one of the user's own: an upload of a followed channel, in a
+    playlist, watched or rated? (The rest are leftovers of YouTube searches.)"""
+    vid = e["vid"]
+    return bool((e["upload"] and e["channel"] in st.follows) or vid in st.in_pl or vid in st.watched or vid in st.ratings)
+
+
+_xwords = {}  # (vid, title, channel) -> word sets of a video from outside the library
+
+
+def match(vid, toks, st):
+    """Relevance of a library video or of one of the user's own outside videos to the words of a search."""
+    if vid in V:
+        return relevance(toks, WORDS[vid]) if all(t in BLOB[vid] for t in toks) else 0.0
+    e = st.extra.get(vid)
+    if not e or not own_extra(e, st):
+        return 0.0
+    key = (vid, e["title"], e["channel"])
+    if key not in _xwords:
+        t = words(e["title"])
+        _xwords[key] = (frozenset(t), frozenset(words(e["channel"])), frozenset(), " ".join(t))
+    return relevance(toks, _xwords[key])
+
+
+def respell(toks, st):
+    """For a search that found nothing: each word that no title, channel or topic contains is replaced by the
+    closest word that one does, the commoner the better. Returns the words unchanged when there is nothing close."""
+    vocab = Counter(VOCAB)
+    for e in st.extra.values():
+        if own_extra(e, st):
+            vocab.update(set(words(e["title"]) + words(e["channel"])))
+    pool = [w for w in vocab if len(w) >= 3]
+    out = []
+    for t in toks:
+        near = [] if t in vocab or len(t) < 4 else difflib.get_close_matches(t, pool, n=5, cutoff=0.78)
+        out.append(max(near, key=lambda w: (round(difflib.SequenceMatcher(None, t, w).ratio(), 1), vocab[w])) if near else t)
+    return out
+
+
 @app.get("/api/videos")
 def videos(q: str = "", area: str = "", cat: str = "", len: str = "", type: str = "",
            channel: str = "", unwatched: int = 0, page: int = 1, sort: str = ""):
     load_meta()
     types = split_types(type)
-    toks = q.lower().split()
+    q = "" if channel or area or cat else q.strip()[:200]
     with db() as c:
         st = State(c)
-    hits = []
-    for v in VIDEOS:  # already best-scored first
-        vid = v["vid"]
-        if vid in DUPES or vid in st.hidden or META.get(vid, {}).get("gone"):
-            continue
-        if channel and v["channel"] != channel:
-            continue
-        if (unwatched or st.hide_watched) and vid in st.watched:
-            continue
-        if toks and not all(t in BLOB[vid] for t in toks):
-            continue
-        if sort == "recent" and vid not in LAST_REC:
-            continue
-        if sort == "gems" and not (v["hn"]["recommenders"] >= GEM_MIN_RECS
-                                   and (META.get(vid, {}).get("views") or GEM_MAX_VIEWS) < GEM_MAX_VIEWS):
-            continue
-        if passes(vid, st, area, cat, len, types):
-            hits.append(vid)
+
+    def scan(toks):
+        hits, rel = [], {}
+        for v in VIDEOS:  # already best-scored first
+            vid = v["vid"]
+            if vid in DUPES or vid in st.hidden or META.get(vid, {}).get("gone"):
+                continue
+            if channel and v["channel"] != channel:
+                continue
+            if (unwatched or st.hide_watched) and vid in st.watched:
+                continue
+            if toks:
+                r = match(vid, toks, st)
+                if not r:
+                    continue
+                rel[vid] = r + 0.5 * math.log1p(v["score"]) / math.log1p(SCORE_MAX)
+            if sort == "recent" and vid not in LAST_REC:
+                continue
+            if sort == "gems" and not (v["hn"]["recommenders"] >= GEM_MIN_RECS
+                                       and (META.get(vid, {}).get("views") or GEM_MAX_VIEWS) < GEM_MAX_VIEWS):
+                continue
+            if passes(vid, st, area, cat, len, types):
+                hits.append(vid)
+        if toks and not types and sort not in ("recent", "gems"):
+            # a search also covers the user's own videos from outside the library: uploads of followed channels,
+            # playlist entries, anything watched or rated
+            for e in st.extra.values():
+                vid = e["vid"]
+                if vid in st.hidden or ((unwatched or st.hide_watched) and vid in st.watched) or not passes(vid, st, length=len):
+                    continue
+                r = match(vid, toks, st)
+                if r:
+                    rel[vid] = r + 0.4
+                    hits.append(vid)
+        return hits, rel
+
+    toks, corrected = words(q), None
+    hits, rel = scan(toks) if toks or not q else ([], {})
+    if toks and not hits:
+        fixed = respell(toks, st)
+        if fixed != toks:
+            hits, rel = scan(fixed)
+            corrected = " ".join(fixed) if hits else None
+
+    def meta_of(vid, k):
+        return (META.get(vid, {}).get(k) if vid in V else st.extra[vid]["published" if k == "pub" else k])
     # sorts are stable, so ties keep the best-scored-first order
     if sort == "recent":
         hits.sort(key=lambda vid: LAST_REC[vid], reverse=True)
     elif sort == "date":  # newest upload first; unknown dates last
-        hits.sort(key=lambda vid: META.get(vid, {}).get("pub") or "", reverse=True)
+        hits.sort(key=lambda vid: meta_of(vid, "pub") or "", reverse=True)
     elif sort == "views":
-        hits.sort(key=lambda vid: META.get(vid, {}).get("views") or 0, reverse=True)
+        hits.sort(key=lambda vid: meta_of(vid, "views") or 0, reverse=True)
     elif sort == "gems":  # much HN love for few YouTube views
         hits.sort(key=lambda vid: V[vid]["score"] / math.log10(META[vid]["views"] + 100) ** 2, reverse=True)
+    elif toks:  # a search: best match first
+        hits.sort(key=lambda vid: rel[vid], reverse=True)
     if channel:  # uploads from outside the HN data, newest first, after the HN picks
         ups = [e for e in st.extra.values() if e["channel"] == channel and e["upload"]
                and e["vid"] not in st.hidden and passes(e["vid"], st, area, cat, len)
                and not ((unwatched or st.hide_watched) and e["vid"] in st.watched)]
         hits += [e["vid"] for e in sorted(ups, key=lambda e: e["published"] or "", reverse=True)]
+
+    def out(vid):
+        d = card(vid, st)
+        if toks and vid not in V:  # say why a video from outside the library is among the results
+            if vid in st.in_pl:
+                d["reason"] = {"kind": "own", "text": f"In your playlist: {st.in_pl[vid][1]}", "playlist": st.in_pl[vid][0]}
+            elif d.get("upload") and d["followed"]:
+                d["reason"] = {"kind": "own", "text": "From a channel you follow"}
+        return d
     per = 48
     pages = max(1, -(-hits.__len__() // per))
     page = max(1, min(page, pages))
-    return {"total": hits.__len__(), "page": page, "pages": pages,
-            "items": [card(v, st) for v in hits[(page - 1) * per: page * per]],
-            "channel": {"name": channel, "followed": channel in st.follows} if channel else None}
+    return {"total": hits.__len__(), "page": page, "pages": pages, "corrected": corrected,
+            "items": [out(v) for v in hits[(page - 1) * per: page * per]],
+            "channel": {"name": channel, "followed": channel in st.follows, "quiet": channel in st.quiet} if channel else None}
 
 
 def forget_old_searches(c):
@@ -734,6 +922,7 @@ def forget_old_searches(c):
     for t in ("items", "watched", "ratings", "hidden"):
         gone -= {r[0] for r in c.execute(f"select vid from {t}")}
     c.executemany("delete from extra where vid=? and upload=0", [(v,) for v in gone])
+    c.execute("delete from descs where vid not in (select vid from extra)")
 
 
 def youtube_search(c, q):
@@ -760,13 +949,13 @@ def youtube_search(c, q):
 
 @app.get("/api/ytsearch")
 def ytsearch(q: str = "", len: str = ""):
-    """General YouTube results for a search, shown under the HN results. HN videos that the search above
-    already lists (their text matches every word) are left out; other HN videos YouTube finds are kept."""
+    """General YouTube results for a search, shown under the app's own results. Videos that the search above
+    already lists (see match()) are left out; other library videos YouTube finds are kept."""
     q = q.strip()[:200]
     if not q:
         return {"items": []}
     load_meta()
-    toks = q.lower().split()
+    toks = words(q)
     with db() as c:
         vids = youtube_search(c, q)
         st = State(c)
@@ -775,10 +964,12 @@ def ytsearch(q: str = "", len: str = ""):
         if vid in st.hidden or (st.hide_watched and vid in st.watched) or not passes(vid, st, length=len):
             continue
         if vid in V:
-            if vid in DUPES or META.get(vid, {}).get("gone") or all(t in BLOB[vid] for t in toks):
+            if vid in DUPES or META.get(vid, {}).get("gone"):
                 continue
         elif vid not in st.extra:
             continue
+        if toks and match(vid, toks, st):
+            continue  # the results above already list it
         items.append(card(vid, st))
     return {"items": items[:YT_SEARCH_SHOW]}
 
@@ -800,6 +991,16 @@ def video(vid: str):
                 if nxt:
                     d["next_in"] = {"playlist": p["name"], "pid": p["id"], "vid": nxt, "title": card(nxt, st)["title"]}
                     break
+        if vid not in V:  # YouTube's own description, fetched the first time the video is opened (1 quota unit)
+            r = c.execute("select text from descs where vid=?", (vid,)).fetchone()
+            if r is None and os.environ.get("YOUTUBE_API_KEY"):
+                try:
+                    it = (yt("videos", part="snippet", id=vid).get("items") or [{}])[0]
+                    r = (it.get("snippet", {}).get("description") or "",)
+                    c.execute("insert or replace into descs(vid, text, ts) values(?,?,?)", (vid, r[0], time.time()))
+                except HTTPException:
+                    pass  # no description this time; the page works without
+            d["desc"] = r[0] if r else None
     d["url"] = f"https://www.youtube.com/watch?v={vid}"
     d["gone"] = bool(META.get(vid, {}).get("gone"))
     if vid in V:
@@ -825,7 +1026,7 @@ def set_watched(vid: str, payload: dict = Body(default={})):
             c.execute("delete from progress where vid=?", (vid,))
         else:
             c.execute("delete from watched where vid=?", (vid,))
-        return {"watched": c.execute("select count(*) from watched").fetchone()[0]}
+        return {"watched": sum(r[0] in V for r in c.execute("select vid from watched"))}
 
 
 @app.post("/api/progress/{vid}")
@@ -930,7 +1131,8 @@ def liked():
 
 @app.get("/api/foryou")
 def foryou(area: str = "", cat: str = "", len: str = "", type: str = ""):
-    """Unwatched HN videos closest to the user's likes, with at most 3 per channel and 6 per liked video."""
+    """Unwatched HN videos closest to the user's likes and to the topics they asked for more of, with at most
+    3 per channel and 6 per liked video."""
     load_meta()
     types = split_types(type)
     with db() as c:
@@ -939,23 +1141,42 @@ def foryou(area: str = "", cat: str = "", len: str = "", type: str = ""):
     ranked = []
     for v in VIDEOS:
         vid = v["vid"]
-        if (vid not in t["why"] or vid in st.watched or vid in st.hidden or vid in st.ratings or vid in DUPES
-                or v["shelf_life"] == "news" or v["hn"]["recommenders"] == 0 or META.get(vid, {}).get("gone")
-                or not passes(vid, st, area, cat, len, types)):
+        tw = topic_weight(vid, st)
+        if ((vid not in t["why"] and tw <= 0) or vid in st.watched or vid in st.hidden or vid in st.ratings
+                or vid in DUPES or v["shelf_life"] == "news" or v["hn"]["recommenders"] == 0
+                or META.get(vid, {}).get("gone") or not passes(vid, st, area, cat, len, types)):
             continue
-        ranked.append((t["aff"][vid] + 0.04 * math.log(max(v["score"], 1)), vid))
+        ranked.append((t["aff"].get(vid, 0) + 0.3 * tw + 0.04 * math.log(max(v["score"], 1)), vid))
     ranked.sort(reverse=True)
     per_channel, per_source, items = Counter(), Counter(), []
     for _, vid in ranked:
-        ch, source = V[vid]["channel"], t["why"][vid][1]
-        if per_channel[ch] >= 3 or per_source[source] >= 6:
+        ch, source = V[vid]["channel"], t["why"].get(vid, (None, None))[1]
+        if per_channel[ch] >= 3 or (source and per_source[source] >= 6):
             continue
         per_channel[ch] += 1
         per_source[source] += 1
-        items.append(dict(card(vid, st), reason=taste_reason(t, vid)))
+        items.append(dict(card(vid, st), reason=taste_reason(t, vid) or topic_reason(vid, st)))
         if items.__len__() >= 48:
             break
-    return {"items": items, "likes": sum(r > 0 for r in st.ratings.values()), "watched": st.watched.__len__()}
+    return {"items": items, "likes": sum(r > 0 for r in st.ratings.values()), "watched": sum(v in V for v in st.watched),
+            "topics": sum(w > 0 for w in st.topics.values())}
+
+
+TOPIC_IDS = {a["id"] for a in TAXONOMY["areas"]} | {x["id"] for a in TAXONOMY["areas"] for x in a["categories"]}
+
+
+@app.post("/api/topic")
+def set_topic(payload: dict = Body(...)):
+    """More (1) or less (-1) of a topic area or category on the home page and For You; 0 clears it."""
+    tid, w = payload.get("id"), payload.get("w", 0)
+    if tid not in TOPIC_IDS or w not in (1, 0, -1):
+        raise HTTPException(400, "unknown topic or weight")
+    with db() as c:
+        if w:
+            c.execute("insert into topics(id, w) values(?, ?) on conflict(id) do update set w=excluded.w", (tid, w))
+        else:
+            c.execute("delete from topics where id=?", (tid,))
+    return {"id": tid, "w": w}
 
 
 @app.post("/api/settings")
@@ -964,6 +1185,8 @@ def set_settings(payload: dict = Body(...)):
         for k in SETTINGS:
             if k in payload:
                 kv_set(c, k, "1" if payload[k] else "0")
+        if payload.get("home_max_len") in HOME_MAX_LEN_CHOICES:
+            kv_set(c, "home_max_len", payload["home_max_len"])
         return State(c).settings
 
 
@@ -1013,9 +1236,10 @@ def dearrow(payload: dict = Body(...)):
 def history():
     with db() as c:
         st = State(c)
-    rows = sorted(st.watched.items(), key=lambda x: -x[1])[:300]
-    return {"items": [dict(card(v, st), when=datetime.fromtimestamp(t).strftime("%Y-%m-%d"))
-                      for v, t in rows if v in V or v in st.extra],
+    # newest first, 300 at most; rows from a Takeout file without readable dates carry tiny timestamps and no day
+    rows = sorted(((v, t) for v, t in st.watched.items() if v in V or v in st.extra), key=lambda x: -x[1])[:300]
+    return {"items": [dict(card(v, st), when=datetime.fromtimestamp(t).strftime("%Y-%m-%d") if t > 86400 * 365 else "")
+                      for v, t in rows],
             "hidden": [card(v, st) for v in st.hidden if v in V or v in st.extra]}
 
 
@@ -1043,6 +1267,14 @@ def follow(payload: dict = Body(...)):
             kv_set(c, "last_refresh", 0)  # pick up its uploads on the next mix
         else:
             c.execute("delete from follows where channel=?", (name,))
+    return {"ok": True}
+
+
+@app.post("/api/follow/quiet")
+def follow_quiet(payload: dict = Body(...)):
+    """Keep a followed channel off the home page (its videos stay on Following and on its own page), or let it back."""
+    with db() as c:
+        c.execute("update follows set quiet=? where channel=?", (1 if payload.get("quiet", True) else 0, payload.get("channel")))
     return {"ok": True}
 
 
@@ -1142,7 +1374,7 @@ def following():
         vids = [v for v in BY_CHANNEL.get(n, []) if v not in DUPES]
         chans.append({"name": n, "hn": len(vids), "unwatched": sum(v not in st.watched for v in vids),
                       "new": sum(st.is_new(e["vid"]) for e in st.extra.values() if e["channel"] == n),
-                      "checked": bool(checked.get(n))})
+                      "checked": bool(checked.get(n)), "quiet": n in st.quiet})
     ups = sorted((e for e in st.extra.values() if e["upload"] and e["channel"] in st.follows
                   and e["vid"] not in st.watched and e["vid"] not in st.hidden),
                  key=lambda e: e["published"] or "", reverse=True)[:60]
@@ -1437,16 +1669,169 @@ def playlist_remove(pid: int, payload: dict = Body(...)):
 
 @app.post("/api/playlists/{pid}/move")
 def playlist_move(pid: int, payload: dict = Body(...)):
+    """Move one video: dir "up"/"down" by one place, "top"/"bottom", or "before" another video (null: to the end)."""
     with db() as c:
         vids = [r[0] for r in c.execute("select vid from items where playlist_id=? order by pos", (pid,))]
-        if payload["vid"] in vids:
-            i = vids.index(payload["vid"])
-            j = i + (-1 if payload.get("dir") == "up" else 1)
-            if 0 <= j < len(vids):
-                vids[i], vids[j] = vids[j], vids[i]
-                c.executemany("update items set pos=? where playlist_id=? and vid=?",
-                              [(n, pid, v) for n, v in enumerate(vids, 1)])
+        vid, d = payload.get("vid"), payload.get("dir")
+        if vid in vids:
+            i = vids.index(vid)
+            if "before" in payload or d in ("top", "bottom"):
+                vids.remove(vid)
+                b = payload.get("before")
+                vids.insert(0 if d == "top" else vids.index(b) if b in vids else len(vids), vid)
+            else:
+                j = i + (-1 if d == "up" else 1)
+                if 0 <= j < len(vids):
+                    vids[i], vids[j] = vids[j], vids[i]
+            c.executemany("update items set pos=? where playlist_id=? and vid=?",
+                          [(n, pid, v) for n, v in enumerate(vids, 1)])
     return {"ok": True}
+
+
+@app.get("/api/playlists/of/{vid}")
+def playlists_of(vid: str):
+    """The ids of the playlists that hold a video, for the ticks in the Save picker."""
+    with db() as c:
+        return {"ids": [r[0] for r in c.execute("select playlist_id from items where vid=?", (vid,))]}
+
+
+@app.post("/api/later/{vid}")
+def set_later(vid: str, payload: dict = Body(default={})):
+    """The one-click queue: put a video in the "Watch later" playlist (made on first use) or take it out."""
+    on = bool(payload.get("on", True))
+    with db() as c:
+        pid = later_id(c, create=on)
+        if pid and on:
+            pos = c.execute("select coalesce(max(pos), 0) + 1 from items where playlist_id=?", (pid,)).fetchone()[0]
+            c.execute("insert or ignore into items(playlist_id, vid, pos) values(?,?,?)", (pid, vid, pos))
+        elif pid:
+            c.execute("delete from items where playlist_id=? and vid=?", (pid, vid))
+    return {"on": on, "id": pid}
+
+
+# ---- Takeout: watch history and liked videos, to give recommendations something to go on
+#
+# "YouTube and YouTube Music/history/watch-history.json" (or .html, Takeout's default format) lists every video
+# opened. Imported videos count as watched; rows get src='takeout' so the whole import can be taken back.
+
+_takeout_history = {}  # token -> parsed rows of the file last previewed (kept in memory until imported)
+
+
+def parse_when(s):
+    """The timestamp of a date as watch-history.html prints it ("Jan 5, 2024, 3:04:05 PM EST"), or None."""
+    s = html.unescape(s).replace("\u202f", " ").replace("\xa0", " ").strip()
+    s = re.sub(r"\s+(?:[A-Z]{2,5}|(?:GMT|UTC)[+-]\d+(?::\d+)?)$", "", s).replace("Sept ", "Sep ")
+    for f in ("%b %d, %Y, %I:%M:%S %p", "%d %b %Y, %H:%M:%S", "%b %d, %Y, %H:%M:%S", "%d %b %Y, %I:%M:%S %p",
+              "%B %d, %Y, %I:%M:%S %p", "%d %B %Y, %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y, %H:%M:%S"):
+        try:
+            return datetime.strptime(s, f).timestamp()
+        except ValueError:
+            pass
+    return None
+
+
+def parse_history(data):
+    """(video id, timestamp or None) for each video in a Takeout watch history, newest first, once per video.
+    Advertisements and YouTube Music plays are left out."""
+    text = data.decode("utf-8", "replace").lstrip("\ufeff").lstrip()
+    rows, entries = {}, 0
+    if text[:1] == "[":
+        try:
+            items = json.loads(text)
+        except ValueError:
+            raise HTTPException(400, "That file is not complete JSON. Pick watch-history.json from a Takeout export.")
+        for r in items:
+            if not isinstance(r, dict) or r.get("header") == "YouTube Music":
+                continue
+            if any(isinstance(d, dict) and d.get("name") == "From Google Ads" for d in r.get("details") or []):
+                continue
+            m = re.search(r"[?&]v=([\w-]{11})", str(r.get("titleUrl") or ""))
+            if not m:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(r.get("time")).replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                ts = None
+            entries += 1
+            rows.setdefault(m.group(1), ts)
+    else:
+        for m in re.finditer(r'href="https?://www\.youtube\.com/watch\?v=([\w-]{11})', text):
+            end = text.find("</div>", m.end(), m.end() + 2000)
+            cell = text[m.end():end if end > 0 else m.end() + 600]
+            if "From Google Ads" in text[m.end():m.end() + 1200].split('class="outer-cell', 1)[0]:
+                continue
+            parts = [p for p in (re.sub(r"<[^>]+>", "", x).strip() for x in cell.split("<br>")) if p]
+            entries += 1
+            rows.setdefault(m.group(1), parse_when(parts[-1]) if parts else None)
+    out = list(rows.items())
+    return [(v, t if t else float(len(out) - i)) for i, (v, t) in enumerate(out)], entries
+
+
+@app.post("/api/takeout/history/preview")
+async def takeout_history_preview(request: Request):
+    """Takes the file itself as the request body (these files run to tens of megabytes)."""
+    data = await request.body()
+    if len(data) > 300_000_000:
+        raise HTTPException(400, "That file is too large to be a watch history")
+    rows, entries = parse_history(data)
+    if not rows:
+        raise HTTPException(400, "No videos found in that file. Pick watch-history.json or watch-history.html from the "
+                                 "\"YouTube and YouTube Music/history\" folder of a Google Takeout export.")
+    with db() as c:
+        st = State(c)
+    token = hashlib.blake2b(data, digest_size=8).hexdigest()
+    _takeout_history.clear()
+    _takeout_history[token] = rows
+    dated = sorted(t for _, t in rows if t > 86400 * 365)
+    day = lambda t: datetime.fromtimestamp(t).strftime("%Y-%m-%d")
+    return {"token": token, "entries": entries, "videos": len(rows),
+            "library": sum(v in V for v, _ in rows), "known": sum(v in V or v in st.extra for v, _ in rows),
+            "new": sum(v not in st.watched for v, _ in rows),
+            "new_known": sum(v not in st.watched and (v in V or v in st.extra) for v, _ in rows),
+            "first": day(dated[0]) if dated else None, "last": day(dated[-1]) if dated else None}
+
+
+@app.post("/api/takeout/history/import")
+def takeout_history_import(payload: dict = Body(...)):
+    rows = _takeout_history.pop(payload.get("token"), None)
+    if rows is None:
+        raise HTTPException(400, "Pick the file again: the app restarted since it was read.")
+    with db() as c:
+        before = c.execute("select count(*) from watched").fetchone()[0]
+        c.executemany("insert or ignore into watched(vid, ts, src) values(?,?,'takeout')", rows)
+        c.execute("delete from progress where vid in (select vid from watched)")
+        return {"added": c.execute("select count(*) from watched").fetchone()[0] - before}
+
+
+@app.post("/api/takeout/likes")
+def takeout_likes(payload: dict = Body(...)):
+    """A playlist CSV from Takeout (the "Liked videos" one) whose videos become likes. Videos that already have a
+    rating keep it. Without "apply" it only counts."""
+    text = str(payload.get("csv") or "")
+    if len(text) > 20_000_000:
+        raise HTTPException(400, "That file is too large to be a playlist")
+    lists, _ = parse_takeout([{"name": "likes.csv", "csv": text}])
+    vids = lists[0]["vids"] if lists else []
+    if not vids:
+        raise HTTPException(400, "No videos found in that file. Pick the CSV of your liked videos from a Takeout export.")
+    with db() as c:
+        st = State(c)
+        new = [v for v in vids if v not in st.ratings]
+        if payload.get("apply"):
+            now = time.time()
+            c.executemany("insert or ignore into ratings(vid, rating, ts, src) values(?,1,?,'takeout')",
+                          [(v, now - i) for i, v in enumerate(new)])
+    return {"videos": len(vids), "new": len(new), "library": sum(v in V for v in new),
+            "known": sum(v in V or v in st.extra for v in new)}
+
+
+@app.post("/api/takeout/forget")
+def takeout_forget():
+    """Take back everything a Takeout history or likes import added."""
+    with db() as c:
+        w = c.execute("delete from watched where src='takeout'").rowcount
+        r = c.execute("delete from ratings where src='takeout'").rowcount
+    return {"watched": w, "ratings": r}
 
 
 @app.get("/")
