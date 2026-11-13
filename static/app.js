@@ -10,6 +10,12 @@ try { localStorage.removeItem('pt-filters'); } catch { /* filters used to be glo
 const svg = d => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
 const I = {
   play: svg('M8 5v14l11-7z'),
+  pause: svg('M6 19h4V5H6v14zm8-14v14h4V5h-4z'),
+  vol: svg('M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z'),
+  volOff: svg('M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.796 8.796 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z'),
+  fs: svg('M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z'),
+  fsExit: svg('M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z'),
+  cc: svg('M19 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1c0 .55-.45 1-1 1H7c-.55 0-1-.45-1-1v-4c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1c0 .55-.45 1-1 1h-3c-.55 0-1-.45-1-1v-4c0-.55.45-1 1-1h3c.55 0 1 .45 1 1v1z'),
   check: svg('M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z'),
   add: svg('M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z'),
   save: svg('M14 10H3v2h11v-2zm0-4H3v2h11V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM3 16h7v-2H3v2z'),
@@ -385,13 +391,14 @@ function intentGate(box, again) {
         <button class="pill" data-act="intent" data-kind="one">Just this video</button></div></div>`;
 }
 
-// Three ways to play, behind one small interface (time, dur, playing, seek, play, pause, rate, destroy):
+// Three ways to play, behind one small interface (time, dur, playing, seek, play, pause, destroy; the two web ones
+// also rate, rates, vol, muted, loaded and, for YouTube, captions, which the control bar below uses):
 // - the phone's own player (window.PTNative, the Android app's Kotlin side): it sits above the page, keeps playing
 //   with the screen off, skips SponsorBlock segments and reports progress to the server itself;
 // - a downloaded file (v.dl), in a plain <video>;
 // - YouTube's embedded player, for everything else.
 // If one fails the next is tried: native, then the file, then YouTube.
-let ytApi = null, player = null, progTimer = null, sbTimer = null, flushProgress = null, nativeOn = null;
+let ytApi = null, player = null, pctl = null, progTimer = null, sbTimer = null, uiTimer = null, flushProgress = null, nativeOn = null;
 const NATIVE = window.PTNative || null;
 function loadYT() {
   if (!ytApi) ytApi = new Promise((res, rej) => {
@@ -404,7 +411,9 @@ function loadYT() {
   return ytApi;
 }
 function stopPlayer() {
-  clearInterval(progTimer); clearInterval(sbTimer);
+  clearInterval(progTimer); clearInterval(sbTimer); clearInterval(uiTimer);
+  if (pctl) { pctl.off(); pctl = null; }
+  if (document.fullscreenElement && document.fullscreenElement.id === 'player') document.exitFullscreen().catch(() => { /* already out */ });
   if (flushProgress) { flushProgress(); flushProgress = null; }
   if (player) { try { player.destroy(); } catch { /* already gone */ } player = null; }
 }
@@ -432,14 +441,42 @@ function ytBackend(vid, start, on) {
     if (!$('#yt')) return rej(new Error('gone'));   // navigated away while the player script loaded
     const p = new YT.Player('yt', {
       host: 'https://www.youtube-nocookie.com', videoId: vid, width: '100%', height: '100%',
-      playerVars: { autoplay: 1, rel: 0, playsinline: 1, start: Math.floor(start) },
+      // controls=0: the app draws its own bar (playerControls), which also keeps YouTube's "More videos" shelf away
+      playerVars: { autoplay: 1, rel: 0, playsinline: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, start: Math.floor(start) },
       events: {
         onReady: () => {
           if (B.speed !== 1) p.setPlaybackRate(B.speed);
+          let cc = false;
           res({
             time: () => p.getCurrentTime ? p.getCurrentTime() : 0, dur: () => p.getDuration ? p.getDuration() : 0,
             playing: () => p.getPlayerState && p.getPlayerState() === YT.PlayerState.PLAYING,
             seek: t => p.seekTo(t, true), play: () => p.playVideo(), pause: () => p.pauseVideo(),
+            rate: r => r === undefined ? p.getPlaybackRate() : p.setPlaybackRate(r),
+            rates: () => p.getAvailablePlaybackRates(),
+            vol: x => x === undefined ? p.getVolume() / 100 : p.setVolume(Math.round(x * 100)),
+            muted: m => m === undefined ? p.isMuted() : m ? p.mute() : p.unMute(),
+            loaded: () => p.getVideoLoadedFraction(),
+            // the IFrame API's captions module is undocumented: load it and pick a track, or unload it.
+            // Resolves to whether captions are now on (false when the video has none).
+            captions: on => {
+              if (on === undefined) return cc;
+              if (!on) { cc = false; try { p.setOption('captions', 'track', {}); p.unloadModule('captions'); } catch { /* not loaded */ } return Promise.resolve(false); }
+              try { p.loadModule('captions'); } catch { return Promise.resolve(false); }
+              return new Promise(done => {
+                let n = 0;
+                const look = setInterval(() => {
+                  let list = [];
+                  try { list = p.getOption('captions', 'tracklist') || []; } catch { /* not ready */ }
+                  if (!list.length && ++n < 12) return;
+                  clearInterval(look);
+                  const lang = (navigator.language || 'en').slice(0, 2);
+                  const t = list.find(x => x.languageCode === lang && !x.kind) || list.find(x => x.languageCode.startsWith(lang)) || list[0];
+                  if (t) try { p.setOption('captions', 'track', { languageCode: t.languageCode }); } catch { /* keep the default */ }
+                  cc = !!t;
+                  done(cc);
+                }, 250);
+              });
+            },
             destroy: () => p.destroy(),
           });
         },
@@ -451,7 +488,7 @@ function ytBackend(vid, start, on) {
 }
 
 function fileBackend(vid, start, on) {
-  $('#yt').outerHTML = `<video id="yt" controls autoplay playsinline preload="auto" src="/media/${vid}.mp4"></video>`;
+  $('#yt').outerHTML = `<video id="yt" autoplay playsinline preload="auto" src="/media/${vid}.mp4"></video>`;
   const el = $('#yt');
   return new Promise((res, rej) => {
     el.addEventListener('loadedmetadata', () => {
@@ -460,6 +497,10 @@ function fileBackend(vid, start, on) {
       res({
         time: () => el.currentTime, dur: () => el.duration || 0, playing: () => !el.paused && !el.ended,
         seek: t => { el.currentTime = t; }, play: () => el.play(), pause: () => el.pause(),
+        rate: r => r === undefined ? el.playbackRate : (el.playbackRate = r),
+        vol: x => x === undefined ? el.volume : (el.volume = x),
+        muted: m => m === undefined ? el.muted : (el.muted = m),
+        loaded: () => el.buffered.length && el.duration ? el.buffered.end(el.buffered.length - 1) / el.duration : 0,
         destroy: () => { el.pause(); el.removeAttribute('src'); el.load(); },
       });
     }, { once: true });
@@ -495,8 +536,7 @@ async function startPlayer(vid) {
   }
   const v = CARDS[vid] || (CARDS[vid] = { vid });
   box.dataset.on = 1;
-  box.innerHTML = '<div id="yt"></div><div id="sbask"></div>';
-  document.querySelectorAll('.sbbar').forEach(x => x.remove());
+  box.innerHTML = '<div id="yt"></div><div class="pshield"></div><div id="sbask"></div>';
   const watch = $('.watch');
   if (watch) watch.classList.add('playing');
   let start = v.resume || 0;
@@ -553,28 +593,185 @@ async function startPlayer(vid) {
   player = p;
   flushProgress = () => { check(); if (dur) send(); };
   progTimer = setInterval(check, 5000);
-  if (!p.native) sponsorWatch(vid, p);
+  if (p.native) return;
+  const ctl = pctl = playerControls(box, p);
+  sponsorWatch(vid, p, ctl);
 }
 // closing the tab mid-video: hand the last position and seconds to the browser to deliver
 addEventListener('pagehide', () => { if (flushProgress) flushProgress(); dlFlush(); });
 
+// The web players' own controls. YouTube's are turned off, so its title overlay and "More videos" shelf never
+// show, and SponsorBlock segments can be drawn on the seek bar. A transparent shield over the video takes the
+// clicks (click: play or pause, double click: fullscreen), which also keeps the keyboard with the page. The bar
+// hides while the video plays and the mouse is still. Returns what the keyboard and SponsorBlock need.
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+const clock = s => fmtDur(Math.floor(s)) || '0:00';
+const rateText = r => r === 1 ? 'Normal' : r + '×';
+function playerControls(box, p) {
+  box.insertAdjacentHTML('beforeend', `<div class="pbar">
+    <div class="pseek"><div class="ptrack"><i class="pbuf"></i><i class="pfill"></i><span class="psegs"></span></div><i class="pknob"></i><span class="ptip" hidden></span></div>
+    <div class="prow">
+      <button class="pbtn" data-pc="play"></button>
+      <button class="pbtn" data-pc="mute"></button>
+      <input class="pvol" type="range" min="0" max="100" step="5" aria-label="Volume">
+      <span class="ptime"></span><span class="pgrow"></span>
+      ${p.captions ? `<button class="pbtn" data-pc="cc" title="Captions (c)" aria-label="Captions">${I.cc}</button>` : ''}
+      <button class="pbtn prate" data-pc="rate" title="Speed (&lt; &gt;)" aria-label="Speed"></button>
+      <button class="pbtn" data-pc="fs"></button>
+    </div><div class="pmenu" hidden></div></div>`);
+  const bar = $('.pbar', box), seek = $('.pseek', bar), tip = $('.ptip', bar), menu = $('.pmenu', bar), vol = $('.pvol', bar);
+  const btn = k => $(`[data-pc="${k}"]`, bar);
+  let segs = [], drawn = false, drag = null, idleT = null, last = {};
+  const ac = new AbortController(), sig = { signal: ac.signal };   // the box outlives a player (Replay)
+  const dur = () => p.dur() || 0;
+  // only touch the DOM when something shown has changed
+  const set = (key, val, fn) => { if (last[key] !== val) { last[key] = val; fn(val); } };
+  const update = () => {
+    if (player !== p) return;
+    const d = dur(), t = drag !== null ? drag * d : p.time(), playing = p.playing();
+    const f = d ? Math.min(1, t / d) : 0;
+    set('f', f.toFixed(4), () => { $('.pfill', bar).style.width = f * 100 + '%'; $('.pknob', bar).style.left = f * 100 + '%'; });
+    if (p.loaded) set('b', (p.loaded() || 0).toFixed(3), b => { $('.pbuf', bar).style.width = b * 100 + '%'; });
+    set('t', clock(t) + ' / ' + clock(d), x => { $('.ptime', bar).textContent = x; });
+    set('play', playing, x => { const b = btn('play'); b.innerHTML = x ? I.pause : I.play; b.title = (x ? 'Pause' : 'Play') + ' (k)'; b.setAttribute('aria-label', x ? 'Pause' : 'Play'); });
+    const m = p.muted() || p.vol() === 0;
+    set('m', m, x => { const b = btn('mute'); b.innerHTML = x ? I.volOff : I.vol; b.title = (x ? 'Unmute' : 'Mute') + ' (m)'; b.setAttribute('aria-label', x ? 'Unmute' : 'Mute'); });
+    if (document.activeElement !== vol) set('v', m ? 0 : Math.round(p.vol() * 100), x => { vol.value = x; });
+    set('r', p.rate(), x => { btn('rate').textContent = x === 1 ? '1×' : x + '×'; });
+    if (p.captions) set('cc', p.captions(), x => { btn('cc').classList.toggle('on', x); box.classList.toggle('cc', x); });
+    const full = document.fullscreenElement === box;
+    set('fs', full, x => { const b = btn('fs'); b.innerHTML = x ? I.fsExit : I.fs; b.title = (x ? 'Exit fullscreen' : 'Fullscreen') + ' (f)'; b.setAttribute('aria-label', x ? 'Exit fullscreen' : 'Fullscreen'); });
+    if (!playing) wake(true);
+    if (d && segs.length && !drawn) {
+      drawn = true;
+      $('.psegs', bar).innerHTML = segs.map(g => `<i style="left:${100 * g.s / d}%;width:${Math.max(100 * (Math.min(g.e, d) - g.s) / d, 0.4)}%;background:${esc(g.color)}"></i>`).join('');
+    }
+  };
+  // show the bar; unless `stay`, hide it again after a while of playing with the mouse still
+  const wake = stay => {
+    box.classList.remove('idle');
+    clearTimeout(idleT);
+    if (!stay) idleT = setTimeout(sleep, 2500);
+  };
+  const sleep = () => { if (player === p && p.playing() && drag === null && menu.hidden && !bar.matches(':hover')) box.classList.add('idle'); };
+  const toggle = () => { p.playing() ? p.pause() : p.play(); setTimeout(update, 50); };
+  const seekTo = s => { p.seek(Math.max(0, Math.min(s, dur() - 0.5))); wake(); setTimeout(update, 50); };
+  const setVol = x => { x = Math.max(0, Math.min(1, x)); p.vol(x); if (x > 0 && p.muted()) p.muted(false); wake(); setTimeout(update, 50); };
+  const rates = () => (p.rates && p.rates().length ? p.rates() : RATES).filter(r => r >= 0.25 && r <= 2);
+  const setRate = r => { p.rate(r); setTimeout(update, 50); };
+  const fs = () => (document.fullscreenElement === box ? document.exitFullscreen() : box.requestFullscreen()).catch(() => { /* refused */ });
+  const cc = async () => {
+    if (!p.captions) return;
+    const want = !p.captions();
+    const on = await p.captions(want);
+    if (want && !on) toast('No captions for this video');
+    update();
+  };
+  const closeMenu = () => { menu.hidden = true; };
+  const openMenu = () => {
+    const now = p.rate();
+    menu.innerHTML = rates().map(r => `<button data-rate="${r}" class="${r === now ? 'on' : ''}">${rateText(r)}</button>`).join('');
+    menu.hidden = false;
+    wake(true);
+  };
+
+  // the shield: a mouse click plays or pauses; a tap shows the bar first if it was hidden
+  let touch = false;
+  const shield = $('.pshield', box);
+  shield.addEventListener('pointerdown', e => { touch = e.pointerType === 'touch'; });
+  shield.addEventListener('click', () => {
+    if (!menu.hidden) return closeMenu();
+    if (touch && box.classList.contains('idle')) return wake();
+    toggle();
+  });
+  shield.addEventListener('dblclick', fs);
+  box.addEventListener('mousemove', () => wake(), sig);
+  box.addEventListener('mouseleave', () => { if (p.playing() && drag === null && menu.hidden) box.classList.add('idle'); }, sig);
+  // buttons don't take the focus from a click, so Space and the other keys stay with the player
+  bar.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+  bar.addEventListener('click', e => {
+    const r = e.target.closest('[data-rate]');
+    if (r) { setRate(+r.dataset.rate); return closeMenu(); }
+    const b = e.target.closest('[data-pc]');
+    if (!b) return;
+    const k = b.dataset.pc;
+    if (k !== 'rate') closeMenu();
+    if (k === 'play') toggle();
+    else if (k === 'mute') { p.muted(!(p.muted() || p.vol() === 0)); if (!p.muted() && p.vol() === 0) p.vol(0.5); setTimeout(update, 50); }
+    else if (k === 'rate') menu.hidden ? openMenu() : closeMenu();
+    else if (k === 'fs') fs();
+    else if (k === 'cc') cc();
+  });
+  vol.addEventListener('input', () => setVol(vol.value / 100));
+  vol.addEventListener('change', () => vol.blur());
+  document.addEventListener('fullscreenchange', update, sig);
+
+  // the seek bar: drag to seek, hover for the time (and the segment) under the pointer
+  const frac = e => { const r = seek.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
+  const showTip = e => {
+    const d = dur();
+    if (!d) return;
+    const x = frac(e), s = x * d, g = segs.find(g => s >= g.s && s < g.e);
+    tip.textContent = clock(s) + (g ? ' · ' + g.name : '');
+    tip.hidden = false;
+    const w = seek.clientWidth, half = tip.offsetWidth / 2;
+    tip.style.left = Math.max(half, Math.min(w - half, x * w)) + 'px';
+  };
+  seek.addEventListener('pointerdown', e => {
+    if (e.button) return;
+    e.preventDefault();
+    seek.setPointerCapture(e.pointerId);
+    seek.classList.add('drag');
+    drag = frac(e);
+    showTip(e); update();
+  });
+  seek.addEventListener('pointermove', e => {
+    showTip(e);
+    if (drag !== null) { drag = frac(e); update(); }
+  });
+  const endDrag = e => {
+    if (drag === null) return;
+    const to = e.type === 'pointerup' ? frac(e) : null;
+    drag = null;
+    seek.classList.remove('drag');
+    if (to !== null) seekTo(to * dur());
+    if (e.pointerType !== 'mouse') tip.hidden = true;
+  };
+  seek.addEventListener('pointerup', endDrag);
+  seek.addEventListener('pointercancel', endDrag);
+  seek.addEventListener('pointerleave', () => { if (drag === null) tip.hidden = true; });
+
+  update();
+  wake();
+  clearInterval(uiTimer);
+  uiTimer = setInterval(update, 250);
+  return {
+    off: () => { ac.abort(); clearTimeout(idleT); box.classList.remove('idle', 'cc'); },
+    marks: list => { segs = list; drawn = false; update(); },
+    toggle, fs, cc,
+    seekBy: s => seekTo(p.time() + s),
+    jump: x => seekTo(x * dur()),
+    volBy: dx => setVol((p.muted() ? 0 : p.vol()) + dx),
+    mute: () => btn('mute').click(),
+    rateBy: dir => {
+      const rs = rates(), i = rs.indexOf(p.rate()), r = rs[Math.max(0, Math.min(rs.length - 1, (i < 0 ? rs.indexOf(1) : i) + dir))];
+      setRate(r); wake(); toast('Speed: ' + rateText(r));
+    },
+  };
+}
+
 // SponsorBlock in the web player: segments set to "skip" are skipped with an undo; "ask" ones show a Skip button
-// while they play. A thin strip under the player marks where they are. (The phone's player does all this itself.)
-async function sponsorWatch(vid, p) {
+// while they play. The seek bar shows where they are. (The phone's player does all this itself.)
+async function sponsorWatch(vid, p, ctl) {
   if (!B.settings.sponsorblock) return;
   let segs;
   try { segs = (await api('/sponsor/' + vid)).segs; } catch { return; }
   if (!segs.length || player !== p) return;
   const ask = $('#sbask');
-  let strip = false;
+  ctl.marks(segs);
   const tick = () => {
     if (player !== p) return clearInterval(sbTimer);
-    const t = p.time(), d = p.dur();
-    if (d && !strip) {
-      strip = true;
-      $('#player').insertAdjacentHTML('afterend', `<div class="sbbar" aria-hidden="true">${segs.map(g =>
-        `<i style="left:${100 * g.s / d}%;width:${Math.max(100 * (Math.min(g.e, d) - g.s) / d, 0.4)}%;background:${esc(g.color)}" title="${esc(g.name)}"></i>`).join('')}</div>`);
-    }
+    const t = p.time();
     const g = segs.find(x => t >= x.s && t < x.e - 0.5);
     if (g && g.act === 'skip' && !g.done) {
       g.done = true;
@@ -1424,6 +1621,23 @@ $('#theme').addEventListener('click', () => {
 const GO = { h: '#/', y: '#/foryou', e: '#/explore', f: '#/following', p: '#/playlists', l: '#/library', r: '#/review', s: '#/setup' };
 const KEY_ACT = { w: 'later', m: 'seen', l: 'like', p: 'watch' };
 let goAt = 0;
+// While a video plays, its keys are YouTube's: they take over j, k, l and m from the page until it stops.
+const PLAYER_KEYS = {
+  ' ': ['toggle'], k: ['toggle'], j: ['seekBy', -10], l: ['seekBy', 10], ArrowLeft: ['seekBy', -10], ArrowRight: ['seekBy', 10],
+  ArrowUp: ['volBy', 0.05], ArrowDown: ['volBy', -0.05], m: ['mute'], f: ['fs'], c: ['cc'], '<': ['rateBy', -1], '>': ['rateBy', 1],
+};
+function playerKey(k) {
+  // the phone's player has no bar here; give it the basic ones
+  const c = pctl || {
+    toggle: () => player.playing() ? player.pause() : player.play(),
+    seekBy: s => player.seek(Math.max(0, player.time() + s)),
+    jump: x => player.seek(x * player.dur()),
+  };
+  const [fn, arg] = PLAYER_KEYS[k] || (/^[0-9]$/.test(k) ? ['jump', k / 10] : []);
+  if (!fn || !c[fn]) return false;
+  c[fn](arg);
+  return true;
+}
 // run a data-act on a video as if a button inside its card had been clicked
 function runAct(act, host) {
   const b = document.createElement('button');
@@ -1441,6 +1655,11 @@ document.addEventListener('keydown', e => {
     if (GO[k] !== undefined) { e.preventDefault(); location.hash = GO[k]; return; }
   }
   if (k === 'g') { goAt = Date.now(); return; }
+  const onVideo = routeName() === 'v', host = el.closest('#main [data-vid]') || (onVideo && $('#main .primary[data-vid]'));
+  if (onVideo && (el === document.body || el.closest('#player'))) {   // the player, while nothing else has the focus
+    if (k === ' ' && !player) { e.preventDefault(); return host && startPlayer(host.dataset.vid); }
+    if (player && playerKey(k)) { e.preventDefault(); return; }
+  }
   if (k === 'j' || k === 'k') {
     const all = [...document.querySelectorAll('#main a.vt')].filter(a => a.offsetParent);
     if (!all.length) return;
@@ -1450,18 +1669,6 @@ document.addEventListener('keydown', e => {
     to.focus({ preventScroll: true });
     (to.closest('[data-vid]') || to).scrollIntoView({ block: 'nearest' });
     return;
-  }
-  const onVideo = routeName() === 'v', host = el.closest('#main [data-vid]') || (onVideo && $('#main .primary[data-vid]'));
-  if (onVideo && el === document.body) {      // the player, while nothing else has the focus
-    if (k === ' ') {
-      e.preventDefault();
-      if (!player) return host && startPlayer(host.dataset.vid);
-      return player.playing() ? player.pause() : player.play();
-    }
-    if ((k === 'ArrowLeft' || k === 'ArrowRight') && player) {
-      e.preventDefault();
-      return player.seek(Math.max(0, player.time() + (k === 'ArrowLeft' ? -10 : 10)));
-    }
   }
   if (!host) return;
   if (k === 's') { e.preventDefault(); return listPopup(host.dataset.vid, el === document.body ? $('[data-act="list"]', host) || host : el, host); }

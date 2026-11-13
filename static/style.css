@@ -237,17 +237,55 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
 .poster .play svg { width: 32px; height: 32px; color: #fff; }
 .player .msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: #ddd; }
 .player .msg a { color: #3ea6ff; }
-/* SponsorBlock: where the segments are, under the player, and the Skip button for the ones that ask first */
-.sbbar { position: relative; height: 4px; margin-top: 6px; border-radius: 2px; background: var(--bg2); overflow: hidden; }
-.sbbar i { position: absolute; top: 0; bottom: 0; opacity: .85; }
-#sbask { position: absolute; right: 12px; bottom: 56px; z-index: 2; }
+/* the web players' own controls (playerControls): a click shield over the video and a bar that hides while playing */
+.player:fullscreen { border-radius: 0; aspect-ratio: auto; }
+/* YouTube still draws its title, logo and "More videos" button along the frame's edges with controls=0, so the frame
+   is made taller than the box: a 16:9 video then has black bands above and below it, cut off with the overlays
+   (sized against the box with container units, so it also works in fullscreen on a screen of another shape) */
+.player { container-type: size; }
+.player iframe#yt { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+                    width: min(100cqw, 100cqh * 16 / 9); height: calc(min(100cqh, 100cqw * 9 / 16) + 144px); }
+/* captions sit low in the frame, where the cut would take them, so with captions on the frame is the video's size
+   (by then the title YouTube shows as a video starts is gone, and with no pointer reaching the frame nothing returns) */
+.player.cc iframe#yt { height: min(100cqh, 100cqw * 9 / 16); }
+.pshield { position: absolute; inset: 0; z-index: 1; }
+.player.idle, .player.idle .pshield { cursor: none; }
+.pbar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; padding: 32px 12px 2px; color: #fff;
+        background: linear-gradient(transparent, rgba(0,0,0,.75)); transition: opacity .2s; --pacc: #3fcfb9; }
+.player.idle .pbar { opacity: 0; pointer-events: none; }
+.pseek { position: relative; height: 16px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
+.ptrack { position: relative; flex: 1; height: 4px; background: rgba(255,255,255,.25); transition: height .1s; }
+.pseek:hover .ptrack, .pseek.drag .ptrack { height: 6px; }
+.ptrack i, .psegs i { position: absolute; top: 0; bottom: 0; left: 0; width: 0; }
+.pbuf { background: rgba(255,255,255,.4); }
+.pfill { background: var(--pacc); }
+.psegs i { opacity: .9; }
+.pknob { position: absolute; top: 50%; width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; border-radius: 50%; background: var(--pacc);
+         transform: scale(0); transition: transform .1s; pointer-events: none; }
+.pseek:hover .pknob, .pseek.drag .pknob { transform: none; }
+.ptip { position: absolute; bottom: 20px; transform: translateX(-50%); padding: 3px 8px; border-radius: 4px; background: rgba(0,0,0,.85);
+        font-size: 12px; white-space: nowrap; pointer-events: none; }
+.prow { display: flex; align-items: center; gap: 2px; height: 44px; }
+.pgrow { flex: 1; }
+.pbtn { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; color: #fff; }
+.pbtn:hover, .pbtn:focus-visible { background: rgba(255,255,255,.14); }
+.pbtn.on { color: var(--pacc); }
+.prate { width: auto; min-width: 40px; padding: 0 10px; border-radius: 20px; font-size: 13px; font-weight: 500; }
+.pvol { width: 72px; accent-color: #fff; cursor: pointer; }
+.ptime { margin-left: 8px; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pmenu { position: absolute; right: 56px; bottom: 56px; padding: 6px 0; border-radius: 8px; background: rgba(28,28,28,.95); }
+.pmenu button { display: block; width: 100%; padding: 6px 28px; text-align: left; font-size: 14px; color: #fff; }
+.pmenu button:hover { background: rgba(255,255,255,.12); }
+.pmenu button.on { color: var(--pacc); font-weight: 500; }
+/* SponsorBlock: the segments sit on the seek bar; the Skip button is for the ones that ask first */
+#sbask { position: absolute; right: 12px; bottom: 72px; z-index: 2; }
 #sbask .pill { background: rgba(15,15,15,.85); color: #fff; border: 1px solid rgba(255,255,255,.25); }
 #sbask .pill:hover { background: var(--accent); color: var(--on-accent); }
 .sbdot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: 0; }
 .sbcats .setting { margin-top: 8px; padding: 8px 16px; }
 video#yt { background: #000; }
 /* on the phone the app's own player sits above the page, so the page drops its player box and top bar */
-body.native-on .top, body.native-on #player, body.native-on .sbbar { display: none; }
+body.native-on .top, body.native-on #player { display: none; }
 body.native-on main { padding-top: 8px; }
 /* downloads */
 .dlmeta { margin-top: 6px; font-size: 12px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
@@ -437,6 +475,7 @@ body.loading::before { content: ""; position: fixed; inset: 0 0 auto 0; height: 
         box-shadow: var(--shadow); max-width: min(560px, calc(100vw - 32px)); }
 #keys::backdrop { background: rgba(0,0,0,.4); }
 #keys h3 { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+#keys h4 { font-size: 15px; font-weight: 500; margin: 4px 0 10px; }
 #keys dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0 0 12px; }
 #keys dt { white-space: nowrap; }
 #keys dd { margin: 0; color: var(--muted); line-height: 22px; }
@@ -468,6 +507,7 @@ kbd { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: var
   .grid, .pgrid { grid-template-columns: 1fr; gap: 24px; }
   .watch { padding-top: 0; }
   .player { border-radius: 0; margin: 0 -16px; }
+  .pvol { display: none; }
   .plrows li { flex-wrap: wrap; }
   .plrows .num { display: none; }
   .plrows .thumb { width: 140px; }
