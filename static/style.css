@@ -237,6 +237,23 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
 .poster .play svg { width: 32px; height: 32px; color: #fff; }
 .player .msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: #ddd; }
 .player .msg a { color: #3ea6ff; }
+/* SponsorBlock: where the segments are, under the player, and the Skip button for the ones that ask first */
+.sbbar { position: relative; height: 4px; margin-top: 6px; border-radius: 2px; background: var(--bg2); overflow: hidden; }
+.sbbar i { position: absolute; top: 0; bottom: 0; opacity: .85; }
+#sbask { position: absolute; right: 12px; bottom: 56px; z-index: 2; }
+#sbask .pill { background: rgba(15,15,15,.85); color: #fff; border: 1px solid rgba(255,255,255,.25); }
+#sbask .pill:hover { background: var(--accent); color: var(--on-accent); }
+.sbdot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: 0; }
+.sbcats .setting { margin-top: 8px; padding: 8px 16px; }
+video#yt { background: #000; }
+/* on the phone the app's own player sits above the page, so the page drops its player box and top bar */
+body.native-on .top, body.native-on #player, body.native-on .sbbar { display: none; }
+body.native-on main { padding-top: 8px; }
+/* downloads */
+.dlmeta { margin-top: 6px; font-size: 12px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.dlmeta .link { font-size: 12px; }
+#dlpending .progress { margin-top: 6px; max-width: 420px; }
+.dlsum { margin: 16px 0 12px; }
 .watch h1 { font-size: 20px; line-height: 28px; font-weight: 700; margin: 12px 0 8px; overflow-wrap: anywhere; }
 .owner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .owner .who { display: flex; align-items: center; gap: 12px; min-width: 0; }

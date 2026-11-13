@@ -8,6 +8,8 @@ import json
 import math
 import os
 import re
+import secrets
+import shutil
 import sqlite3
 import threading
 import time
@@ -21,15 +23,18 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import sync
 import uvicorn
 import ytkey
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 ytkey.load()  # env var, else the login keyring
 ROOT = Path(__file__).parent
-DB = ROOT / "state.db"
+DB = Path(os.environ.get("PT_STATE") or ROOT / "state.db")  # each device keeps its own; see sync.py
+SYNC_DIR = Path(os.environ.get("PT_SYNC") or ROOT / "sync")  # the change logs that Syncthing carries between devices
+DL_DIR = Path(os.environ.get("PT_DOWNLOADS") or ROOT / "downloads")  # per device, never synced; see "Downloads"
 META_FILE = ROOT / "youtube_meta.jsonl"
 PORT = 8765  # fixed on purpose: tooling outside this repository depends on this exact origin (see CLAUDE.md)
 
@@ -50,7 +55,7 @@ MIN_UPLOAD_SECONDS = 180  # skip Shorts / tiny clips from followed channels
 NEW_DAYS = 14             # uploads this recent get the NEW! badge
 LEN_BUCKETS = {"short": (0, 20 * 60), "medium": (20 * 60, 60 * 60), "long": (60 * 60, 10 ** 9)}
 # on/off switches kept in kv as "1"/"0", with the value used until the user first touches one
-SETTINGS = {"hide_watched": False, "dearrow": True, "calm": True, "ask_intent": True}
+SETTINGS = {"hide_watched": False, "dearrow": True, "calm": True, "ask_intent": True, "sponsorblock": True}
 WATCH_WEIGHT = 0.35       # a watched-but-unrated video counts this much of a like when judging taste
 TASTE_PULL = 3.0          # mix weight is multiplied by exp(TASTE_PULL * affinity), clipped to 0.2..15
 DEARROW_TTL = 7 * 86400   # re-ask DeArrow for a video's title/frame after this long
@@ -59,6 +64,16 @@ YT_SEARCH_KEEP = 30 * 86400  # after this long a search and the results nobody t
 YT_SEARCH_SHOW = 24
 TOPIC_MORE, TOPIC_LESS = 4.0, 0.1  # mix weight of a topic the user asked for more of / less of
 HOME_MAX_LEN_CHOICES = (0, 3600, 7200, 10800)  # "uploads longer than this stay off the home page"; 0 is no limit
+SPEED_CHOICES = (1, 1.25, 1.5, 1.75, 2)  # the playback speed every video starts at
+DL_QUALITY_CHOICES = (360, 480, 720, 1080)  # the tallest picture a download may have
+# SponsorBlock categories in the order Settings lists them: (name, what happens by default, colour on the seek bar).
+# "skip" skips with an undo, "ask" shows a Skip button while the segment plays, "off" ignores it.
+SB_CATS = {"sponsor": ("Sponsor", "skip", "#00d400"), "selfpromo": ("Self-promotion", "skip", "#ffff00"),
+           "interaction": ("Reminder to like or subscribe", "ask", "#cc00ff"), "intro": ("Intro", "ask", "#00ffff"),
+           "outro": ("End cards and credits", "ask", "#0202ed"), "preview": ("Preview or recap", "ask", "#008fd6"),
+           "filler": ("Tangent or filler", "off", "#7300ff"), "music_offtopic": ("Non-music part of a music video", "ask", "#ff9900")}
+SB_ACTIONS = ("skip", "ask", "off")
+SB_TTL = 86400  # segments are added while a video is new, so ask SponsorBlock again after a day
 UA = "Mozilla/5.0 (compatible; local-video-app)"
 
 # ---------------------------------------------------------------- dataset
@@ -144,6 +159,13 @@ _meta_mtime = 0.0
 _meta_lock = threading.Lock()
 
 
+def to_float(x, default=None):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
 def to_int(x):
     try:
         return int(x)
@@ -207,6 +229,7 @@ create table if not exists watchlog(day text, vid text, secs real, primary key(d
 create table if not exists intents(ts real, intent text);
 create table if not exists topics(id text primary key, w integer);
 create table if not exists descs(vid text primary key, text text, ts real);
+create table if not exists sponsor(vid text primary key, segs text, ts real);
 """
 
 
@@ -235,6 +258,18 @@ with db() as _c:
             _c.execute(f"alter table {_t} add column src text")
 
 
+# Changes to the user's tables are written to SYNC_DIR and those of other devices are taken in (sync.py). Of kv,
+# only the settings and the things both devices must agree on are shared; timers and caches stay local.
+SYNC = sync.Sync(DB, SYNC_DIR, kv_keys=(*SETTINGS, "home_max_len", "watch_later", "speed", "dl_quality"),
+                 kv_prefixes=("reshuffle:", "sb:"))
+SYNC.start()
+
+
+def new_pid():
+    """A playlist id that no other device will hand out too (a plain counter would, and sync would merge the two)."""
+    return secrets.randbelow(2 ** 40) + 2 ** 20
+
+
 def kv_get(c, k, default=None):
     r = c.execute("select v from kv where k=?", (k,)).fetchone()
     return r[0] if r else default
@@ -253,7 +288,7 @@ def later_id(c, create=False):
     r = c.execute("select id from playlists where lower(name)='watch later' order by ts").fetchone()
     pid = r[0] if r else None
     if not pid and create:
-        pid = c.execute("insert into playlists(name, ts) values('Watch later', ?)", (time.time(),)).lastrowid
+        pid = c.execute("insert into playlists(id, name, ts) values(?, 'Watch later', ?)", (new_pid(), time.time())).lastrowid
     if pid:
         kv_set(c, "watch_later", pid)
     return pid
@@ -271,6 +306,10 @@ class State:
         self.hide_watched = self.settings["hide_watched"]
         self.quiet = {r[0] for r in c.execute("select channel from follows where quiet=1")}
         self.home_max_len = to_int(kv_get(c, "home_max_len")) or 0
+        self.speed = to_float(kv_get(c, "speed"), 1)
+        self.dl_quality = to_int(kv_get(c, "dl_quality")) or 720
+        self.sb = {k: kv_get(c, "sb:" + k, d[1]) for k, d in SB_CATS.items()}  # category -> skip / ask / off
+        self.downloads = downloaded()
         self.topics = {r[0]: r[1] for r in c.execute("select id, w from topics")}  # area or category id -> 1 more, -1 less
         self.in_pl = {}  # vid -> (id, name) of the oldest playlist that holds it
         for r in c.execute("select i.vid, p.id, p.name from items i join playlists p on p.id=i.playlist_id "
@@ -324,6 +363,8 @@ def card(vid, st):
         d["frac"] = round(pr["pos"] / pr["dur"], 3) if pr["dur"] else 0
     if vid in st.da:
         d["da"] = st.da[vid]
+    if vid in st.downloads:
+        d["dl"] = True
     return d
 
 
@@ -746,6 +787,8 @@ def boot():
                 "has_key": bool(os.environ.get("YOUTUBE_API_KEY")),
                 "total": len(VIDEOS), "watched": sum(v in V for v in st.watched),
                 "settings": st.settings, "home_max_len": st.home_max_len, "watch_later": st.later_id,
+                "speed": st.speed, "dl_quality": st.dl_quality, "sb": st.sb,
+                "sb_cats": {k: {"name": d[0], "color": d[2]} for k, d in SB_CATS.items()},
                 "imported": {t: c.execute(f"select count(*) from {t} where src='takeout'").fetchone()[0]
                              for t in ("watched", "ratings")},
                 "follows": [{"name": n, "new": new_by[n]} for n in sorted(st.follows, key=str.lower)],
@@ -758,6 +801,12 @@ def mix(area: str = "", cat: str = "", len: str = "", type: str = ""):
     maybe_refresh_in_background()
     with db() as c:
         return build_mix(c, area, cat, len, split_types(type))
+
+
+@app.get("/api/sync")
+def sync_status():
+    SYNC.run_once()
+    return SYNC.status()
 
 
 @app.post("/api/reshuffle")
@@ -909,6 +958,7 @@ def forget_old_searches(c):
         gone -= set(json.loads(r[0]))
     for t in ("items", "watched", "ratings", "hidden"):
         gone -= {r[0] for r in c.execute(f"select vid from {t}")}
+    gone -= downloaded()
     c.executemany("delete from extra where vid=? and upload=0", [(v,) for v in gone])
     c.execute("delete from descs where vid not in (select vid from extra)")
 
@@ -1183,6 +1233,13 @@ def set_settings(payload: dict = Body(...)):
                 kv_set(c, k, "1" if payload[k] else "0")
         if payload.get("home_max_len") in HOME_MAX_LEN_CHOICES:
             kv_set(c, "home_max_len", payload["home_max_len"])
+        if payload.get("speed") in SPEED_CHOICES:
+            kv_set(c, "speed", payload["speed"])
+        if payload.get("dl_quality") in DL_QUALITY_CHOICES:
+            kv_set(c, "dl_quality", payload["dl_quality"])
+        for k, a in (payload.get("sb") or {}).items():
+            if k in SB_CATS and a in SB_ACTIONS:
+                kv_set(c, "sb:" + k, a)
         return State(c).settings
 
 
@@ -1226,6 +1283,274 @@ def dearrow(payload: dict = Body(...)):
         c.executemany("insert or replace into dearrow(vid, title, time, original, ts) values(?,?,?,?,?)",
                       [(v, r["title"], r["time"], int(r["original"]), time.time()) for v, r in got.items()])
     return got
+
+
+# ---- SponsorBlock: crowdsourced segments (sponsor reads, intros, reminders to subscribe) that the player skips or
+# offers to skip. Asked by hash prefix like DeArrow, cached in `sponsor` (per device, not synced), nothing submitted.
+
+def sb_lookup(vid):
+    """The video's skip segments, best first as SponsorBlock sends them. None means it could not be reached."""
+    prefix = hashlib.sha256(vid.encode()).hexdigest()[:4]
+    q = urllib.parse.urlencode({"categories": json.dumps(list(SB_CATS)), "actionTypes": json.dumps(["skip"])})
+    req = urllib.request.Request(f"https://sponsor.ajay.app/api/skipSegments/{prefix}?{q}", headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.load(r) or []
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            return None
+        data = []
+    except (OSError, ValueError):
+        return None
+    for x in data:
+        if x.get("videoID") == vid:
+            return [{"s": round(float(g["segment"][0]), 2), "e": round(float(g["segment"][1]), 2), "cat": g["category"]}
+                    for g in x.get("segments") or []
+                    if g.get("category") in SB_CATS and len(g.get("segment") or []) == 2 and g["segment"][1] > g["segment"][0]]
+    return []
+
+
+@app.get("/api/sponsor/{vid}")
+def sponsor(vid: str):
+    """The segments to act on while `vid` plays, each with what to do (skip, or ask with a Skip button), under the
+    user's settings. Used by the web player and by the phone's native one."""
+    with db() as c:
+        if kv_get(c, "sponsorblock", "1") != "1":
+            return {"segs": []}
+        acts = {k: kv_get(c, "sb:" + k, d[1]) for k, d in SB_CATS.items()}
+        r = c.execute("select segs, ts from sponsor where vid=?", (vid,)).fetchone()
+    segs = json.loads(r["segs"]) if r and r["ts"] > time.time() - SB_TTL else None
+    if segs is None:
+        segs = sb_lookup(vid)
+        if segs is None:  # unreachable: use what is cached, however old, and ask again next time
+            segs = json.loads(r["segs"]) if r else []
+        else:
+            with db() as c:
+                c.execute("insert or replace into sponsor(vid, segs, ts) values(?,?,?)", (vid, json.dumps(segs), time.time()))
+    return {"segs": [dict(g, act=acts[g["cat"]], name=SB_CATS[g["cat"]][0], color=SB_CATS[g["cat"]][2])
+                     for g in segs if acts.get(g["cat"]) in ("skip", "ask")]}
+
+
+# ---- Downloads: a video saved as DL_DIR/<vid>.mp4 plays from that file, offline too. Each device downloads for
+# itself and nothing is synced: the desktop with yt-dlp (ffmpeg joins picture and sound, deno answers YouTube's
+# script challenges), the phone with its native player's extractor through NATIVE, which the Android app's
+# ptboot.py sets. <vid>.json beside the file keeps what the Downloads list shows even if the video is forgotten.
+
+NATIVE = None  # on the phone: the app's Kotlin side, with download(vid, quality), cancel(vid) and jobs() -> JSON
+DL_JOBS = {}   # vid -> {"state": "queued" | "running" | "error", "frac": 0..1, "error": text}; the desktop's own
+DL_QUEUE = []
+DL_LOCK = threading.Lock()
+DL_WORKER = None
+
+
+def downloaded():
+    try:
+        return {p.stem for p in DL_DIR.glob("*.mp4") if YT_VID.fullmatch(p.stem)}
+    except OSError:
+        return set()
+
+
+def dl_jobs():
+    if NATIVE is not None:
+        try:
+            return json.loads(str(NATIVE.jobs()))
+        except Exception:  # noqa: BLE001 - the native side is outside our control; no jobs is a safe answer
+            return {}
+    with DL_LOCK:
+        return {v: {k: j[k] for k in ("state", "frac", "error") if k in j} for v, j in DL_JOBS.items()}
+
+
+def ytdlp_download(vid, quality, job):
+    import yt_dlp  # desktop only: the phone downloads natively (and has no ffmpeg)
+    tmp = DL_DIR / ".part"
+    tmp.mkdir(parents=True, exist_ok=True)
+    seen = []  # the streams in the order they download (picture, then sound)
+
+    def hook(d):
+        if job.get("cancel"):
+            raise yt_dlp.utils.DownloadCancelled("cancelled")
+        if d.get("status") != "downloading":
+            return
+        if d.get("filename") not in seen:
+            seen.append(d.get("filename"))
+        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        part = min(d.get("downloaded_bytes", 0) / total, 1) if total else 0
+        job["frac"] = round(min((len(seen) - 1 + part) / job.get("parts", 1), 0.99), 3)
+
+    q = int(quality)
+    opts = {"format": f"bv*[height<={q}][vcodec^=avc1]+ba[ext=m4a]/b[height<={q}][ext=mp4]/bv*[height<={q}]+ba/b[height<={q}]/b",
+            "merge_output_format": "mp4", "outtmpl": str(tmp / "%(id)s.%(ext)s"), "noplaylist": True,
+            "quiet": True, "no_warnings": True, "noprogress": True, "progress_hooks": [hook]}
+    with yt_dlp.YoutubeDL(opts) as y:
+        info = y.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
+        job["parts"] = len(info.get("requested_formats") or [None])
+        y.process_info(info)
+    out = tmp / f"{vid}.mp4"
+    if not out.is_file():
+        raise RuntimeError("yt-dlp finished without writing the file")
+    os.replace(out, DL_DIR / f"{vid}.mp4")
+    return info.get("height")
+
+
+def dl_worker():
+    while True:
+        with DL_LOCK:
+            if not DL_QUEUE:
+                return
+            vid, quality = DL_QUEUE.pop(0)
+            job = DL_JOBS.get(vid)
+            if not job or job.get("cancel"):
+                DL_JOBS.pop(vid, None)
+                continue
+            job["state"] = "running"
+        try:
+            height = ytdlp_download(vid, quality, job)
+            meta = DL_DIR / f"{vid}.json"
+            info = json.loads(meta.read_text()) if meta.is_file() else {}
+            meta.write_text(json.dumps(dict(info, height=height, ts=time.time())))
+            with DL_LOCK:
+                DL_JOBS.pop(vid, None)
+        except Exception as e:  # noqa: BLE001 - yt-dlp raises many kinds; the message goes to the Downloads list
+            with DL_LOCK:
+                if job.get("cancel"):
+                    DL_JOBS.pop(vid, None)
+                else:
+                    job.update(state="error", error=re.sub(r"^ERROR:\s*(\[\w+\]\s*\S+:\s*)?", "", str(e))[:300])
+
+
+@app.post("/api/download/{vid}")
+def download_start(vid: str):
+    global DL_WORKER
+    load_meta()
+    with db() as c:
+        st = State(c)
+    if not st.available(vid):
+        raise HTTPException(404, "No such video")
+    if vid in st.downloads:
+        return {"state": "done"}
+    d = card(vid, st)
+    DL_DIR.mkdir(parents=True, exist_ok=True)
+    (DL_DIR / f"{vid}.json").write_text(json.dumps({"title": d["title"], "channel": d["channel"], "dur": d["dur"]}))
+    if NATIVE is not None:
+        NATIVE.download(vid, st.dl_quality)
+        return {"state": "queued"}
+    with DL_LOCK:
+        j = DL_JOBS.get(vid)
+        if j and j["state"] in ("queued", "running") and not j.get("cancel"):
+            return {"state": j["state"]}
+        DL_JOBS[vid] = {"state": "queued", "frac": 0.0}
+        DL_QUEUE.append((vid, st.dl_quality))
+        if not (DL_WORKER and DL_WORKER.is_alive()):
+            DL_WORKER = threading.Thread(target=dl_worker, daemon=True, name="downloads")
+            DL_WORKER.start()
+    return {"state": "queued"}
+
+
+@app.delete("/api/download/{vid}")
+def download_remove(vid: str):
+    """Stops a download that is under way, or deletes a finished one."""
+    if not YT_VID.fullmatch(vid):
+        raise HTTPException(404, "No such video")
+    if NATIVE is not None:
+        NATIVE.cancel(vid)
+    with DL_LOCK:
+        j = DL_JOBS.get(vid)
+        if j:
+            j["cancel"] = True
+            if j["state"] != "running":
+                DL_JOBS.pop(vid, None)
+        DL_QUEUE[:] = [x for x in DL_QUEUE if x[0] != vid]
+    for f in (DL_DIR / f"{vid}.mp4", DL_DIR / f"{vid}.json"):
+        f.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+@app.get("/api/downloads")
+def downloads():
+    load_meta()
+    with db() as c:
+        st = State(c)
+    jobs = dl_jobs()
+
+    def info(vid):
+        try:
+            return json.loads((DL_DIR / f"{vid}.json").read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def entry(vid):
+        i = info(vid)
+        if st.available(vid) or vid in V:
+            return card(vid, st), i
+        return {"vid": vid, "title": i.get("title") or vid, "channel": i.get("channel") or "", "dur": i.get("dur"),
+                "hn": False}, i
+
+    items = []
+    for vid in st.downloads:
+        d, i = entry(vid)
+        f = DL_DIR / f"{vid}.mp4"
+        try:
+            size, mtime = f.stat().st_size, f.stat().st_mtime
+        except OSError:
+            continue
+        d.update(dl=True, size=size, height=i.get("height"), dl_ts=i.get("ts") or mtime)
+        items.append(d)
+    items.sort(key=lambda d: -d["dl_ts"])
+    pending = []
+    for vid, j in jobs.items():
+        if vid not in st.downloads:
+            d, _ = entry(vid)
+            pending.append(dict(d, job=j))
+    return {"items": items, "pending": pending, "free": dl_free()}
+
+
+def dl_free():
+    try:
+        DL_DIR.mkdir(parents=True, exist_ok=True)
+        return shutil.disk_usage(DL_DIR).free
+    except OSError:
+        return None
+
+
+@app.get("/media/{vid}.mp4")
+def media(vid: str, request: Request, save: int = 0):
+    """A downloaded video, with byte ranges so the player can seek. `save=1` hands it over as a file to keep."""
+    f = DL_DIR / f"{vid}.mp4"
+    if not YT_VID.fullmatch(vid) or not f.is_file():
+        raise HTTPException(404, "Not downloaded")
+    size = f.stat().st_size
+    start, end, status = 0, size - 1, 200
+    m = re.fullmatch(r"bytes=(\d*)-(\d*)", request.headers.get("range", "").strip())
+    if m and (m[1] or m[2]):
+        if m[1]:
+            start, end = int(m[1]), min(int(m[2]) if m[2] else size - 1, size - 1)
+        else:
+            start = max(0, size - int(m[2]))
+        if start > end:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+        status = 206
+
+    def body():
+        with open(f, "rb") as fh:
+            fh.seek(start)
+            left = end - start + 1
+            while left > 0:
+                chunk = fh.read(min(1 << 20, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+                yield chunk
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(end - start + 1), "Cache-Control": "no-cache"}
+    if status == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    if save:
+        try:
+            title = json.loads((DL_DIR / f"{vid}.json").read_text()).get("title") or vid
+        except (OSError, ValueError):
+            title = vid
+        name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", title).strip()[:120] or vid
+        headers["Content-Disposition"] = f"attachment; filename=\"{vid}.mp4\"; filename*=UTF-8''{urllib.parse.quote(name + '.mp4')}"
+    return StreamingResponse(body(), status_code=status, media_type="video/mp4", headers=headers)
 
 
 @app.get("/api/history")
@@ -1401,7 +1726,7 @@ def playlist_create(payload: dict = Body(...)):
     if not name:
         raise HTTPException(400, "Give the playlist a name")
     with db() as c:
-        pid = c.execute("insert into playlists(name, ts) values(?, ?)", (name, time.time())).lastrowid
+        pid = c.execute("insert into playlists(id, name, ts) values(?, ?, ?)", (new_pid(), name, time.time())).lastrowid
         if payload.get("vid"):
             c.execute("insert into items(playlist_id, vid, pos) values(?, ?, 1)", (pid, payload["vid"]))
     return {"id": pid}
@@ -1460,8 +1785,8 @@ def playlist_import(payload: dict = Body(...)):
     with db() as c:
         dead = learn_videos(c, vids)
         keep = [v for v in vids if v not in dead]
-        pid = c.execute("insert into playlists(name, yt_id, yt_seen, ts) values(?,?,?,?)",
-                        (name, yt_id, json.dumps(vids), time.time())).lastrowid
+        pid = c.execute("insert into playlists(id, name, yt_id, yt_seen, ts) values(?,?,?,?,?)",
+                        (new_pid(), name, yt_id, json.dumps(vids), time.time())).lastrowid
         set_items(c, pid, keep)
     return {"id": pid, "name": name, "count": len(keep), "skipped": len(vids) - len(keep)}
 
@@ -1579,8 +1904,8 @@ def import_playlists(c, lists):
             out["updated"] += bool(add)
         else:
             order, add = [], vids
-            pid = c.execute("insert into playlists(name, yt_id, yt_seen, ts) values(?,?,?,?)",
-                            (p["name"], p["yt_id"], json.dumps(p["vids"]) if p["yt_id"] else None,
+            pid = c.execute("insert into playlists(id, name, yt_id, yt_seen, ts) values(?,?,?,?,?)",
+                            (new_pid(), p["name"], p["yt_id"], json.dumps(p["vids"]) if p["yt_id"] else None,
                              time.time())).lastrowid
             out["created"] += 1
         set_items(c, pid, order + add)

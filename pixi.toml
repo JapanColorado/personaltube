@@ -8,7 +8,11 @@ python = "3.13.*"
 fastapi = "*"
 uvicorn = "*"
 numpy = ">=2.5.4,<3"
+yt-dlp = ">=2026.10.26,<2027"
+ffmpeg = ">=9.0.2,<10"
+deno = ">=2.9.8,<2.10"
 
 [tasks]
 start = "python server.py"
 fetch-meta = "python fetch_youtube_meta.py"
+apk = { cmd = "./gradlew assembleDebug", cwd = "android" }

@@ -28,6 +28,7 @@ const I = {
   minus: svg('M19 13H5v-2h14v2z'),
   home: svg('M4 21V10.08l8-6.96 8 6.96V21h-6v-6h-4v6H4z'),
   grip: svg('M11 18c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm-2-8c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0-6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z'),
+  dl: svg('M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z'),
   dislike: svg('M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z'),
 };
 
@@ -318,6 +319,7 @@ async function pageVideo(vid, autoplay, pl) {
         <button class="pill ${v.watched ? 'on' : ''}" data-act="seen" title="${seenTitle(v.watched)}">${I.check}<span class="lbl">${seenLabel(v.watched)}</span></button>
         ${laterPill(v)}
         <button class="pill" data-act="list">${I.save} Save</button>
+        ${dlPill(v)}
         <button class="pill" data-act="hide" title="Hide this video forever">${I.hide} Hide</button>
         <a class="pill" href="${esc(v.url)}" target="_blank" rel="noopener">${I.out} YouTube</a>
       </div>
@@ -383,7 +385,14 @@ function intentGate(box, again) {
         <button class="pill" data-act="intent" data-kind="one">Just this video</button></div></div>`;
 }
 
-let ytApi = null, player = null, progTimer = null, flushProgress = null;
+// Three ways to play, behind one small interface (time, dur, playing, seek, play, pause, rate, destroy):
+// - the phone's own player (window.PTNative, the Android app's Kotlin side): it sits above the page, keeps playing
+//   with the screen off, skips SponsorBlock segments and reports progress to the server itself;
+// - a downloaded file (v.dl), in a plain <video>;
+// - YouTube's embedded player, for everything else.
+// If one fails the next is tried: native, then the file, then YouTube.
+let ytApi = null, player = null, progTimer = null, sbTimer = null, flushProgress = null, nativeOn = null;
+const NATIVE = window.PTNative || null;
 function loadYT() {
   if (!ytApi) ytApi = new Promise((res, rej) => {
     window.onYouTubeIframeAPIReady = () => res(window.YT);
@@ -395,7 +404,7 @@ function loadYT() {
   return ytApi;
 }
 function stopPlayer() {
-  clearInterval(progTimer);
+  clearInterval(progTimer); clearInterval(sbTimer);
   if (flushProgress) { flushProgress(); flushProgress = null; }
   if (player) { try { player.destroy(); } catch { /* already gone */ } player = null; }
 }
@@ -417,6 +426,66 @@ function stopScreen(vid, today) {
       ${!one && $('.watch .secondary') ? '<button class="pill" data-act="showrel">Show related</button>' : ''}
       <button class="pill" data-act="play">${I.refresh} Replay</button></div></div>`;
 }
+
+function ytBackend(vid, start, on) {
+  return loadYT().then(YT => new Promise((res, rej) => {
+    if (!$('#yt')) return rej(new Error('gone'));   // navigated away while the player script loaded
+    const p = new YT.Player('yt', {
+      host: 'https://www.youtube-nocookie.com', videoId: vid, width: '100%', height: '100%',
+      playerVars: { autoplay: 1, rel: 0, playsinline: 1, start: Math.floor(start) },
+      events: {
+        onReady: () => {
+          if (B.speed !== 1) p.setPlaybackRate(B.speed);
+          res({
+            time: () => p.getCurrentTime ? p.getCurrentTime() : 0, dur: () => p.getDuration ? p.getDuration() : 0,
+            playing: () => p.getPlayerState && p.getPlayerState() === YT.PlayerState.PLAYING,
+            seek: t => p.seekTo(t, true), play: () => p.playVideo(), pause: () => p.pauseVideo(),
+            destroy: () => p.destroy(),
+          });
+        },
+        onStateChange: e => { on.tick(); if (e.data === YT.PlayerState.ENDED) on.ended(); },
+        onError: () => on.error("YouTube won't play this one here (the uploader may have turned off embedding, or it is gone)."),
+      },
+    });
+  }));
+}
+
+function fileBackend(vid, start, on) {
+  $('#yt').outerHTML = `<video id="yt" controls autoplay playsinline preload="auto" src="/media/${vid}.mp4"></video>`;
+  const el = $('#yt');
+  return new Promise((res, rej) => {
+    el.addEventListener('loadedmetadata', () => {
+      if (start) el.currentTime = start;
+      el.playbackRate = B.speed;
+      res({
+        time: () => el.currentTime, dur: () => el.duration || 0, playing: () => !el.paused && !el.ended,
+        seek: t => { el.currentTime = t; }, play: () => el.play(), pause: () => el.pause(),
+        destroy: () => { el.pause(); el.removeAttribute('src'); el.load(); },
+      });
+    }, { once: true });
+    el.addEventListener('error', () => rej(new Error('the downloaded file would not play')), { once: true });
+    el.addEventListener('play', on.tick);
+    el.addEventListener('pause', on.tick);
+    el.addEventListener('ended', on.ended);
+  });
+}
+
+// The phone's player calls back through window.ptNative(event, data): 'ended' with today's tally, 'error' with why.
+window.ptNative = (ev, data) => { if (nativeOn && nativeOn[ev]) nativeOn[ev](data); };
+function nativeBackend(vid, start, on) {
+  const v = CARDS[vid] || {};
+  nativeOn = { ended: today => on.ended(today), error: why => on.error(why) };
+  NATIVE.play(JSON.stringify({ vid, start, title: ttl(v), channel: v.channel || '', speed: B.speed, thumb: thumb(v, 'hqdefault') }));
+  document.body.classList.add('native-on');
+  scrollTo(0, 0);
+  return Promise.resolve({
+    native: true,
+    time: () => NATIVE.position(), dur: () => NATIVE.duration(), playing: () => NATIVE.playing(),
+    seek: t => NATIVE.seek(t), play: () => NATIVE.resume(), pause: () => NATIVE.pause(),
+    destroy: () => { nativeOn = null; NATIVE.stop(); document.body.classList.remove('native-on'); },
+  });
+}
+
 async function startPlayer(vid) {
   const box = $('#player');
   if (!box || box.dataset.on) return;
@@ -424,61 +493,198 @@ async function startPlayer(vid) {
     const it = getIntent();
     if (!it || (it.kind === 'one' && it.vid !== vid)) return intentGate(box, !!it);
   }
+  const v = CARDS[vid] || (CARDS[vid] = { vid });
   box.dataset.on = 1;
-  box.innerHTML = '<div id="yt"></div>';
+  box.innerHTML = '<div id="yt"></div><div id="sbask"></div>';
+  document.querySelectorAll('.sbbar').forEach(x => x.remove());
   const watch = $('.watch');
   if (watch) watch.classList.add('playing');
-  const giveUp = why => {
-    stopPlayer();
-    box.innerHTML = `<div class="msg"><p>${esc(why)} <a href="https://www.youtube.com/watch?v=${vid}" target="_blank" rel="noopener">Open it on YouTube instead.</a></p></div>`;
-  };
-  let YT;
-  try { YT = await loadYT(); } catch (e) { return giveUp('Sorry, ' + e.message + '.'); }
-  if (!$('#yt')) return;  // navigated away while the player script loaded
-  let start = (CARDS[vid] && CARDS[vid].resume) || 0;
+  let start = v.resume || 0;
   try { start = start || +localStorage.getItem('pt-pos-' + vid) || 0; localStorage.removeItem('pt-pos-' + vid); } catch { /* positions used to live here */ }
-  let marked = !!(CARDS[vid] && CARDS[vid].watched);
+  let marked = !!v.watched;
   const mark = () => { if (!marked) { marked = true; setWatched(vid, true).catch(fail); } };
-  let played = 0, wasPlaying = false, lastTick = Date.now(), lastSent = Date.now(), pos = 0, dur = 0;
-  let today = CARDS[vid] && CARDS[vid].today;
+  let played = 0, wasPlaying = false, lastTick = Date.now(), lastSent = Date.now(), pos = 0, dur = 0, today = v.today;
   const send = () => {
     const body = { pos, dur, played };
     played = 0; lastSent = Date.now();
     return api('/progress/' + vid, body).then(r => { today = r; }).catch(() => { /* next one will carry on */ });
   };
   const check = () => {
-    if (!player || !player.getDuration) return;
+    if (!player || player.native) return;   // the phone's player keeps its own account
     const now = Date.now();
     if (wasPlaying) played += Math.min((now - lastTick) / 1000, 10);
     lastTick = now;
-    wasPlaying = player.getPlayerState() === YT.PlayerState.PLAYING;
-    const d = player.getDuration(), t = player.getCurrentTime();
+    wasPlaying = player.playing();
+    const d = player.dur(), t = player.time();
     if (!d) return;
     pos = t; dur = d;
     if (t >= d * 0.9) mark();
     if (now - lastSent >= 15000 && played > 0) send();
   };
-  flushProgress = () => { check(); if (dur) send(); };
-  player = new YT.Player('yt', {
-    host: 'https://www.youtube-nocookie.com', videoId: vid, width: '100%', height: '100%',
-    playerVars: { autoplay: 1, rel: 0, playsinline: 1, start },
-    events: {
-      onStateChange: async e => {
-        check();
-        if (e.data !== YT.PlayerState.ENDED) return;
-        mark();
-        flushProgress = null;
-        await send();
-        stopPlayer();
-        stopScreen(vid, today);
-      },
-      onError: () => giveUp("YouTube won't play this one here (the uploader may have turned off embedding, or it is gone)."),
+  let done = false;
+  const on = {
+    tick: check,
+    ended: async nativeToday => {
+      if (done) return;
+      done = true;
+      mark();
+      flushProgress = null;
+      if (player && player.native) today = nativeToday || today; else { check(); await send(); }
+      stopPlayer();
+      stopScreen(vid, today);
     },
-  });
+    error: why => {
+      if (done || !$('#player') || $('#player') !== box) return;
+      const kind = player && player.native ? 'native' : v.dl && !v.noFile && $('video#yt') ? 'file' : 'yt';
+      stopPlayer();
+      delete box.dataset.on;
+      if (kind === 'native') { v.noNative = true; toast("This phone's player couldn't open it; trying another way."); return startPlayer(vid); }
+      if (kind === 'file') { v.noFile = true; return startPlayer(vid); }
+      box.innerHTML = `<div class="msg"><p>${esc(why)} <a href="https://www.youtube.com/watch?v=${vid}" target="_blank" rel="noopener">Open it on YouTube instead.</a></p></div>`;
+    },
+  };
+  const make = NATIVE && !v.noNative ? nativeBackend : v.dl && !v.noFile ? fileBackend : ytBackend;
+  let p;
+  try { p = await make(vid, start, on); } catch (e) {
+    if (e.message === 'gone') return;
+    return on.error(make === ytBackend ? 'Sorry, ' + e.message + '.' : e.message);
+  }
+  if (!box.isConnected || box.dataset.on !== '1') { p.destroy(); return; }   // navigated away meanwhile
+  player = p;
+  flushProgress = () => { check(); if (dur) send(); };
   progTimer = setInterval(check, 5000);
+  if (!p.native) sponsorWatch(vid, p);
 }
 // closing the tab mid-video: hand the last position and seconds to the browser to deliver
-addEventListener('pagehide', () => { if (flushProgress) flushProgress(); });
+addEventListener('pagehide', () => { if (flushProgress) flushProgress(); dlFlush(); });
+
+// SponsorBlock in the web player: segments set to "skip" are skipped with an undo; "ask" ones show a Skip button
+// while they play. A thin strip under the player marks where they are. (The phone's player does all this itself.)
+async function sponsorWatch(vid, p) {
+  if (!B.settings.sponsorblock) return;
+  let segs;
+  try { segs = (await api('/sponsor/' + vid)).segs; } catch { return; }
+  if (!segs.length || player !== p) return;
+  const ask = $('#sbask');
+  let strip = false;
+  const tick = () => {
+    if (player !== p) return clearInterval(sbTimer);
+    const t = p.time(), d = p.dur();
+    if (d && !strip) {
+      strip = true;
+      $('#player').insertAdjacentHTML('afterend', `<div class="sbbar" aria-hidden="true">${segs.map(g =>
+        `<i style="left:${100 * g.s / d}%;width:${Math.max(100 * (Math.min(g.e, d) - g.s) / d, 0.4)}%;background:${esc(g.color)}" title="${esc(g.name)}"></i>`).join('')}</div>`);
+    }
+    const g = segs.find(x => t >= x.s && t < x.e - 0.5);
+    if (g && g.act === 'skip' && !g.done) {
+      g.done = true;
+      p.seek(g.e);
+      return toast(`Skipped: ${g.name}`, () => p.seek(g.s));
+    }
+    const want = g && g.act === 'ask' ? g : null;
+    if (ask && (ask.dataset.s || '') !== String(want ? want.s : '')) {
+      ask.dataset.s = want ? want.s : '';
+      ask.innerHTML = want ? `<button class="pill" data-act="sbskip" data-t="${want.e}">Skip ${esc(want.name.toLowerCase())} &rsaquo;</button>` : '';
+    }
+  };
+  sbTimer = setInterval(tick, 400);
+}
+
+// ---- downloads. The server keeps the files (DL_DIR) and runs the jobs; the desktop's go through yt-dlp, the phone's
+// through its native player. Pills and the Downloads tab follow the jobs by asking /api/downloads every two seconds
+// while one is under way. A removal waits for the toast's Undo to pass before the file is deleted.
+const DLJOBS = {};                  // vid -> {state: queued | running | error, frac, error}
+const DLDEL = new Map();            // vid -> timer of a removal still waiting out its Undo
+let dlPoll = null;
+const fmtSize = b => b >= 1e9 ? trim1(b / 1e9) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB';
+function dlPill(v) {
+  const j = DLJOBS[v.vid];
+  let h;
+  if (v.dl) h = `<button class="pill on" data-act="dlrm" title="Remove the download">${I.dl}<span class="lbl">Downloaded</span></button>`;
+  else if (j && j.state !== 'error') h = `<button class="pill" data-act="dlstop" title="Stop the download">${I.dl}<span class="lbl">${j.state === 'running' ? `Downloading ${Math.round(j.frac * 100)}%` : 'Waiting to download'}</span></button>`;
+  else h = `<button class="pill" data-act="dl" title="${j ? esc('The last try failed: ' + j.error) : 'Save it to watch offline'}">${I.dl}<span class="lbl">${j ? 'Try the download again' : 'Download'}</span></button>`;
+  return `<span class="dlp" data-dlv="${v.vid}">${h}</span>`;
+}
+const onDownloads = () => /^#\/library\/downloads/.test(location.hash);
+function dlPaint() {
+  document.querySelectorAll('.dlp[data-dlv]').forEach(el => { const v = CARDS[el.dataset.dlv]; if (v) el.outerHTML = dlPill(v); });
+  for (const [vid, j] of Object.entries(DLJOBS)) {
+    const row = $(`#dlpending [data-vid="${vid}"]`);
+    if (!row) continue;
+    $('.progress i', row).style.width = Math.round((j.frac || 0) * 100) + '%';
+    $('.dlstate', row).textContent = dlState(j);
+  }
+}
+const dlState = j => j.state === 'error' ? 'Failed: ' + j.error : j.state === 'running' ? `Downloading, ${Math.round(j.frac * 100)}%` : 'Waiting';
+function dlWatch() {
+  if (dlPoll) return;
+  dlPoll = setInterval(async () => {
+    let d;
+    try { d = await api('/downloads'); } catch { return; }
+    const before = new Set(Object.keys(DLJOBS));
+    for (const k of before) delete DLJOBS[k];
+    for (const p of d.pending) DLJOBS[p.vid] = p.job;
+    const finished = d.items.filter(i => before.has(i.vid));
+    for (const i of finished) if (CARDS[i.vid]) CARDS[i.vid].dl = true;
+    if (finished.length === 1) toast('Downloaded: ' + ttl(finished[0]));
+    else if (finished.length) toast(`${finished.length} downloads finished`);
+    const changed = finished.length || d.pending.length !== before.size;
+    if (onDownloads() && changed) renderDownloads(d); else dlPaint();
+    if (!d.pending.some(p => p.job.state !== 'error')) { clearInterval(dlPoll); dlPoll = null; }
+  }, 2000);
+}
+async function dlStart(vid) {
+  const r = await api('/download/' + vid, {});
+  if (r.state === 'done') { CARDS[vid].dl = true; } else { DLJOBS[vid] = { state: r.state, frac: 0 }; dlWatch(); }
+  dlPaint();
+  if (onDownloads()) return route();
+  toast(r.state === 'done' ? 'Already downloaded' : 'Downloading. It will play from the file once it is done.');
+}
+async function dlRemove(vid, running) {
+  const v = CARDS[vid] || {};
+  if (running) {
+    await api('/download/' + vid, undefined, 'DELETE');
+    delete DLJOBS[vid];
+    dlPaint();
+    if (onDownloads()) route();
+    return toast('Download stopped');
+  }
+  const gone = () => { DLDEL.delete(vid); api('/download/' + vid, undefined, 'DELETE').catch(fail); };
+  DLDEL.set(vid, setTimeout(gone, 8500));
+  v.dl = false;
+  dlPaint();
+  document.querySelectorAll(`#dlgrid [data-vid="${vid}"]`).forEach(x => { x.hidden = true; });
+  toast('Download removed', () => {
+    clearTimeout(DLDEL.get(vid)); DLDEL.delete(vid);
+    v.dl = true;
+    dlPaint();
+    document.querySelectorAll(`#dlgrid [data-vid="${vid}"]`).forEach(x => { x.hidden = false; });
+  });
+}
+function dlFlush() {                // leaving the page: removals still in their Undo window go through now
+  for (const [vid, timer] of DLDEL) { clearTimeout(timer); fetch('/api/download/' + vid, { method: 'DELETE', keepalive: true }); }
+  DLDEL.clear();
+}
+function renderDownloads(d) {
+  for (const k of Object.keys(DLJOBS)) delete DLJOBS[k];
+  for (const p of d.pending) DLJOBS[p.vid] = p.job;
+  const total = d.items.reduce((a, i) => a + i.size, 0);
+  let h = libraryHead('downloads');
+  if (d.pending.length) h += `<h3 class="sechead">Under way</h3><div class="rows" id="dlpending">${d.pending.map(v => { CARDS[v.vid] = v; return `<div class="r" data-vid="${v.vid}">
+      <div class="name"><a href="#/v/${v.vid}"><b>${esc(ttl(v))}</b></a><div class="sub dlstate">${esc(dlState(v.job))}</div>
+        <span class="progress"><i style="width:${Math.round((v.job.frac || 0) * 100)}%"></i></span></div>
+      ${v.job.state === 'error' ? '<button class="pill" data-act="dl">Try again</button><button class="pill" data-act="dlstop">Forget it</button>' : '<button class="pill" data-act="dlstop">Stop</button>'}</div>`; }).join('')}</div>`;
+  if (d.items.length) {
+    h += `<p class="fine dlsum">${d.items.length} video${d.items.length === 1 ? '' : 's'}, ${fmtSize(total)}${d.free != null ? ` &middot; ${fmtSize(d.free)} free` : ''}. They play from the file, without a connection.</p>
+      <div id="dlgrid" class="grid">${d.items.map(v => card(v).replace('</div>' + kebab, `<div class="dlmeta">${[v.height ? v.height + 'p' : '', fmtSize(v.size)].filter(Boolean).join(' &middot; ')}
+        ${NATIVE ? '' : `<a class="link" href="/media/${v.vid}.mp4?save=1" download>Save a copy</a>`}
+        <button class="link" data-act="dlrm">Remove</button></div></div>${kebab}`)).join('')}</div>`;
+  } else if (!d.pending.length) {
+    h += '<p class="empty">Nothing downloaded. Use Download on a video\'s page or in the three-dot menu of any card; downloaded videos play from the file, without a connection.</p>';
+  }
+  main(h);
+  if (d.pending.some(p => p.job.state !== 'error')) dlWatch();
+}
 
 // Followed channels can be kept off the home page: still followed, still on Following and their own page.
 const quietTitle = q => q ? 'Kept off the home page. Click to let it back.' : 'Shown on the home page. Click to keep it off.';
@@ -599,12 +805,14 @@ function dayLabel(when) {
   if (days < 7) return d.toLocaleDateString(undefined, { weekday: 'long' });
   return d.toLocaleDateString(undefined, d.getFullYear() === now.getFullYear() ? { month: 'long' } : { month: 'long', year: 'numeric' });
 }
+const libraryHead = tab => `<div class="pagehead"><h2>Library</h2></div>
+    <div class="tabs"><a href="#/library" class="${tab ? '' : 'on'}">History</a><a href="#/library/liked" class="${tab === 'liked' ? 'on' : ''}">Liked</a><a href="#/library/downloads" class="${tab === 'downloads' ? 'on' : ''}">Downloads</a></div>`;
 async function pageLibrary(tab) {
+  if (tab === 'downloads') { pageTitle = 'Downloads'; return renderDownloads(await api('/downloads')); }
   const liked = tab === 'liked';
   const d = await api(liked ? '/liked' : '/history');
   pageTitle = liked ? 'Liked' : 'History';
-  let h = `<div class="pagehead"><h2>Library</h2></div>
-    <div class="tabs"><a href="#/library" class="${liked ? '' : 'on'}">History</a><a href="#/library/liked" class="${liked ? 'on' : ''}">Liked</a></div>`;
+  let h = libraryHead(liked ? 'liked' : '');
   if (liked) {
     h += d.items.length ? grid(d.items) : '<p class="empty">No likes yet. Use the thumbs-up on a video\'s page, or the three-dot menu on any card.</p>';
     if (d.disliked.length) h += `<h3 class="sechead">Disliked</h3><div class="rows">${d.disliked.map(v => `<div class="r plain" data-vid="${v.vid}">
@@ -649,6 +857,20 @@ function pageExplore() {
   </div>`);
 }
 
+// Settings of the phone's own player, kept on the phone (they would make no sense on the desktop).
+function nativeSettings() {
+  let p = {};
+  try { p = JSON.parse(NATIVE.prefs()); } catch { /* an older app: none to show */ }
+  const nsw = (key, name, text) => `<label class="setting"><span><b>${name}</b><span>${text}</span></span>
+      <input type="checkbox" class="switch" data-nat="${key}" ${p[key] ? 'checked' : ''}></label>`;
+  return `<h3 class="sechead">On this phone</h3>
+    ${nsw('pip', 'Picture in picture', 'Leaving the app while a video plays keeps it going in a small window. Off, it keeps playing as sound only; lock the screen and it plays on either way, with controls on the lock screen.')}
+    ${nsw('gestures', 'Swipe and double-tap', 'In the player: double-tap the left or right side to go back or ahead 10 seconds, and swipe up or down on the left for brightness, on the right for volume.')}
+    ${nsw('audio_only', 'Sound only', 'Fetch the sound alone, without the picture: less data, and good for talks you only listen to. The player has a button to switch for one video.')}
+    <label class="setting"><span><b>Picture quality</b><span>The tallest picture the phone's player picks to start with; the player's menu changes it for one video.</span></span>
+      <select class="field" data-nat="quality" aria-label="Picture quality">${[360, 480, 720, 1080, 1440, 2160].map(v => `<option value="${v}" ${+p.quality === v ? 'selected' : ''}>${v}p</option>`).join('')}</select></label>`;
+}
+
 function pageSetup() {
   const n = x => x.toLocaleString();
   const sw = (key, name, text) => `<label class="setting"><span><b>${name}</b><span>${text}</span></span>
@@ -660,6 +882,16 @@ function pageSetup() {
     ${sw('calm', 'Calm presentation', 'No view counts, and no "new" dots or badges asking for attention. Uploads from followed channels still arrive in your queue.')}
     ${sw('hide_watched', 'Hide played videos', 'Watched videos disappear from the home page, Explore, search, channel pages and related videos instead of showing dimmed. The Library and playlists still list them.')}
     ${sw('dearrow', 'Video frames and plain titles (DeArrow)', 'Show a frame from the video instead of the uploader\'s thumbnail, and the community-written title from <a href="https://dearrow.ajay.app" target="_blank" rel="noopener">DeArrow</a> where one exists. Hover a title to see the original. Video ids are looked up on DeArrow\'s servers (by hash prefix).')}
+    ${sw('sponsorblock', 'Skip sponsor segments (SponsorBlock)', 'Sponsor reads, intros, reminders to subscribe and the like, as marked by viewers on <a href="https://sponsor.ajay.app" target="_blank" rel="noopener">SponsorBlock</a>. Each kind is skipped (with an undo), offered with a Skip button, or left alone, as set below. Video ids are looked up by hash prefix; nothing is sent back.')}
+    <details class="howto sbcats"><summary>What to do with each kind of segment</summary>
+      ${Object.entries(B.sb_cats).map(([k, c]) => `<label class="setting"><span><b><i class="sbdot" style="background:${esc(c.color)}"></i>${esc(c.name)}</b></span>
+        <select class="field" data-sb="${k}" aria-label="${esc(c.name)}">${[['skip', 'Skip it'], ['ask', 'Show a Skip button'], ['off', 'Leave it']].map(([v, t]) => `<option value="${v}" ${B.sb[k] === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>`).join('')}
+    </details>
+    <label class="setting"><span><b>Playback speed</b><span>The speed every video starts at. You can still change it in the player.</span></span>
+      <select class="field" data-num="speed" aria-label="Playback speed">${[1, 1.25, 1.5, 1.75, 2].map(v => `<option value="${v}" ${B.speed === v ? 'selected' : ''}>${v === 1 ? 'Normal' : v + '×'}</option>`).join('')}</select></label>
+    <label class="setting"><span><b>Download quality</b><span>The tallest picture a download may have. Higher takes more space: an hour at 720p is about 1 GB.</span></span>
+      <select class="field" data-num="dl_quality" aria-label="Download quality">${[360, 480, 720, 1080].map(v => `<option value="${v}" ${B.dl_quality === v ? 'selected' : ''}>${v}p</option>`).join('')}</select></label>
+    ${NATIVE ? nativeSettings() : ''}
     <label class="setting"><span><b>Keep long uploads off Home</b><span>New videos from channels you follow that run longer than this stay on the Following page and never enter the home page queue. To keep one channel off Home altogether, use the house button next to it on Following.</span></span>
       <select class="field" data-num="home_max_len" aria-label="Longest upload shown on Home">${[[0, 'No limit'], [3600, 'Over 1 hour'], [7200, 'Over 2 hours'], [10800, 'Over 3 hours']].map(([v, t]) => `<option value="${v}" ${B.home_max_len === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
 
@@ -699,8 +931,18 @@ pixi run start          # restart the app; it reads the key from the keyring</pr
     <p class="fine">Free quota is 10,000 units a day. Checking uploads costs about 2 units per followed channel, twice a day at most.
       Re-run <code>pixi run fetch-meta --refresh</code> every few months to keep durations and deletions current.</p></details>
 
+    <h3 class="sechead">Other devices</h3>
+    <p class="fine" id="syncinfo">What you do here is written to the <code>sync</code> folder, and what other devices write there is taken in.</p>
+
     <h3 class="sechead">Keyboard</h3>
     <p class="fine">Press <code>?</code> anywhere for the list of shortcuts.</p></div>`);
+  api('/sync').then(d => {
+    const el = $('#syncinfo');
+    if (!el) return;
+    const seen = d.others.map(o => `<code>${esc(o.dev)}</code> (last change taken in ${esc(new Date(o.ts * 1000).toLocaleString())})`).join(', ');
+    el.innerHTML = `What you do here is written to <code>${esc(d.folder)}</code> as <code>${esc(d.dev)}.jsonl</code>, and what other devices write there is taken in. Let Syncthing share that folder; each device keeps its own state file outside it. `
+      + (d.error ? `<b>The folder could not be used: ${esc(d.error)}</b>` : d.others.length ? `Seen so far: ${seen}.` : 'No other device has written there yet.');
+  }).catch(() => {});
 }
 
 // The last seven days, laid out for you to judge rather than to keep you going.
@@ -885,6 +1127,8 @@ function menuPopup(vid, anchor, host) {
     <button class="mi" data-act="seen">${I.check}<span>${seenTitle(on)}</span></button>
     <button class="mi" data-act="later">${I.clock}<span>${laterTitle(!!(CARDS[vid] && CARDS[vid].later))}</span></button>
     <button class="mi" data-act="list">${I.save}<span>Save to playlist</span></button>
+    ${CARDS[vid] && CARDS[vid].dl ? `<button class="mi" data-act="dlrm">${I.dl}<span>Remove the download</span></button>`
+      : DLJOBS[vid] && DLJOBS[vid].state !== 'error' ? '' : `<button class="mi" data-act="dl">${I.dl}<span>Download</span></button>`}
     <button class="mi" data-act="hide">${I.hide}<span>Hide forever</span></button>`, vid, anchor, host);
 }
 // The picker ticks the playlists that already hold the video; clicking one adds or removes it and the picker stays.
@@ -959,7 +1203,7 @@ document.addEventListener('click', async e => {
       case 'seek': {
         const secs = +t.dataset.t;
         $('#player').scrollIntoView({ block: 'nearest' });
-        if (player && player.seekTo) { player.seekTo(secs, true); player.playVideo(); return; }
+        if (player) { player.seek(secs); player.play(); return; }
         if (CARDS[vid]) CARDS[vid].resume = secs;
         return startPlayer(vid);
       }
@@ -992,6 +1236,10 @@ document.addEventListener('click', async e => {
         $('#player').dataset.asked = 1;
         return startPlayer(vid);
       }
+      case 'sbskip': if (player) player.seek(+t.dataset.t); t.remove(); return;
+      case 'dl': return dlStart(vid);
+      case 'dlstop': return dlRemove(vid, true);
+      case 'dlrm': return dlRemove(vid, false);
       case 'showrel': t.remove(); $('.watch').classList.remove('playing'); return;
       case 'seen': return setWatched(vid, !(CARDS[vid] && CARDS[vid].watched));
       case 'list': e.stopPropagation(); return listPopup(vid, anchor, host);
@@ -1102,6 +1350,15 @@ document.addEventListener('change', async e => {
     try { await api('/settings', { [k]: n }); B[k] = n; toast('Saved.'); } catch (err) { fail(err); }
     return;
   }
+  if (e.target.dataset.sb) {
+    const k = e.target.dataset.sb, a = e.target.value;
+    try { await api('/settings', { sb: { [k]: a } }); B.sb[k] = a; toast('Saved.'); } catch (err) { fail(err); }
+    return;
+  }
+  if (e.target.dataset.nat) {
+    NATIVE.setPref(e.target.dataset.nat, e.target.type === 'checkbox' ? String(e.target.checked) : e.target.value);
+    return toast('Saved.');
+  }
   if (e.target.classList.contains('plpick')) return plCount();
   if (e.target.dataset.set) {
     try { B.settings = await api('/settings', { [e.target.dataset.set]: e.target.checked }); renderSide(); toast('Saved.'); }
@@ -1198,12 +1455,12 @@ document.addEventListener('keydown', e => {
   if (onVideo && el === document.body) {      // the player, while nothing else has the focus
     if (k === ' ') {
       e.preventDefault();
-      if (!player || !player.getPlayerState) return host && startPlayer(host.dataset.vid);
-      return player.getPlayerState() === 1 ? player.pauseVideo() : player.playVideo();
+      if (!player) return host && startPlayer(host.dataset.vid);
+      return player.playing() ? player.pause() : player.play();
     }
-    if ((k === 'ArrowLeft' || k === 'ArrowRight') && player && player.seekTo) {
+    if ((k === 'ArrowLeft' || k === 'ArrowRight') && player) {
       e.preventDefault();
-      return player.seekTo(Math.max(0, player.getCurrentTime() + (k === 'ArrowLeft' ? -10 : 10)), true);
+      return player.seek(Math.max(0, player.time() + (k === 'ArrowLeft' ? -10 : 10)));
     }
   }
   if (!host) return;
@@ -1422,6 +1679,11 @@ window.addEventListener('hashchange', async () => {
 (async () => {
   try {
     await reboot();
+    api('/downloads').then(d => {   // downloads left running by an earlier visit
+      for (const p of d.pending) DLJOBS[p.vid] = p.job;
+      dlPaint();
+      if (d.pending.some(p => p.job.state !== 'error')) dlWatch();
+    }).catch(() => {});
     await route();
   } catch (e) { main(`<p class="note err">Could not reach the PersonalTube server: ${esc(e.message)}</p>`); }
 })();

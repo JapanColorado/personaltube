@@ -3,3 +3,9 @@ state.db
 youtube_meta.jsonl
 .env
 __pycache__/
+sync/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+downloads/

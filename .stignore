@@ -1,0 +1,22 @@
+// Syncthing: what stays on this computer. The phone needs only the code (*.py, static/),
+// the library (videos.jsonl, mentions.jsonl, related.jsonl, taxonomy.json, embeddings.npy,
+// embedding_ids.json), youtube_meta.jsonl and sync/. Everything else is per machine or a build.
+
+// pixi environment and its lockfile
+/.pixi
+/pixi.lock
+/pixi.toml
+
+// git, Python caches, the Android project and its builds (the APK is installed, not synced)
+/.git
+(?d)__pycache__
+(?d)*.pyc
+/android
+
+// this computer's own state (the phone keeps its own in app storage), its downloaded videos, and stray files
+/downloads
+/state.db
+/state.db-*
+/log.txt
+/.env
+/.stfolder.removed-*
