@@ -9,3 +9,8 @@ android/build/
 android/app/build/
 android/local.properties
 downloads/
+
+# Signing (CI writes keystore.properties from the repo secrets)
+android/keystore.properties
+*.jks
+*.keystore

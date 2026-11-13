@@ -15,4 +15,9 @@ deno = ">=2.9.8,<2.10"
 [tasks]
 start = "python server.py"
 fetch-meta = "python fetch_youtube_meta.py"
-apk = { cmd = "./gradlew assembleDebug", cwd = "android" }
+install-service = { cmd = "bash scripts/install_systemd.sh", description = "Start the server at login (systemd user service); --uninstall removes it" }
+# Android (the .debug appId installs next to the released app). Releases come from CI, see .github/workflows/android.yml.
+apk = { cmd = "./gradlew assembleDebug", cwd = "android", description = "Build the debug APK" }
+install-debug = { cmd = "./gradlew installDebug", cwd = "android", description = "Build and install the debug APK on every connected adb device (set ANDROID_SERIAL)" }
+run-debug = { cmd = "adb shell am start -n dev.russell.personaltube.debug/dev.russell.personaltube.MainActivity", depends-on = ["install-debug"], description = "Install the debug APK and launch it" }
+check = { cmd = "./gradlew lintDebug --continue", cwd = "android", description = "What CI checks before a release" }

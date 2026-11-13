@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -8,6 +10,13 @@ plugins {
 // (NewPipeExtractor finds the streams, Media3 plays them; see NativePlayer.kt). server.py, static/ and the library
 // are not packed in; they are read from the project folder that Syncthing keeps on the phone, so a change made on
 // the desktop reaches the phone without a new build.
+
+// Commit count of HEAD (CI checks out full history, so local and CI builds agree); 1 outside git.
+val gitCommitCount: Int = runCatching {
+    providers.exec { commandLine("git", "rev-list", "--count", "HEAD") }
+        .standardOutput.asText.get().trim().toInt()
+}.getOrDefault(1)
+
 android {
     namespace = "dev.russell.personaltube"
     compileSdk = 35
@@ -16,15 +25,36 @@ android {
         applicationId = "dev.russell.personaltube"  // fixed: tooling outside this repository refers to the app by this name
         minSdk = 30
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // Every push to main that changes the app publishes a release (.github/workflows/android.yml), so the version
+        // tracks the commit count. Bump the base versionName by hand for notable changes.
+        versionCode = gitCommitCount
+        versionName = "1.0.$gitCommitCount"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
+    // Release signing: gitignored keystore.properties (storeFile, storePassword, keyAlias, keyPassword), written by CI
+    // from the repo secrets. Absent => the release APK is signed with this machine's debug key.
+    val keystoreProps = rootProject.file("keystore.properties")
+        .takeIf { it.exists() }
+        ?.let { f -> Properties().apply { f.inputStream().use { load(it) } } }
+    signingConfigs {
+        if (keystoreProps != null) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"  // installs next to the released app, with its own data
+        }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
