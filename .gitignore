@@ -14,3 +14,7 @@ downloads/
 android/keystore.properties
 *.jks
 *.keystore
+
+# Syncthing folder marker and stray server output
+.stfolder/
+log.txt
