@@ -55,7 +55,7 @@ MIN_UPLOAD_SECONDS = 180  # skip Shorts / tiny clips from followed channels
 NEW_DAYS = 14             # uploads this recent get the NEW! badge
 LEN_BUCKETS = {"short": (0, 20 * 60), "medium": (20 * 60, 60 * 60), "long": (60 * 60, 10 ** 9)}
 # on/off switches kept in kv as "1"/"0", with the value used until the user first touches one
-SETTINGS = {"hide_watched": False, "dearrow": True, "calm": True, "ask_intent": True, "sponsorblock": True}
+SETTINGS = {"hide_watched": False, "dearrow": True, "calm": True, "ask_intent": True, "sponsorblock": True, "captions": False}
 WATCH_WEIGHT = 0.35       # a watched-but-unrated video counts this much of a like when judging taste
 TASTE_PULL = 3.0          # mix weight is multiplied by exp(TASTE_PULL * affinity), clipped to 0.2..15
 DEARROW_TTL = 7 * 86400   # re-ask DeArrow for a video's title/frame after this long

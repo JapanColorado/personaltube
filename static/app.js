@@ -467,7 +467,7 @@ function ytBackend(vid, start, on) {
                 const look = setInterval(() => {
                   let list = [];
                   try { list = p.getOption('captions', 'tracklist') || []; } catch { /* not ready */ }
-                  if (!list.length && ++n < 12) return;
+                  if (!list.length && ++n < 24) return;
                   clearInterval(look);
                   const lang = (navigator.language || 'en').slice(0, 2);
                   const t = list.find(x => x.languageCode === lang && !x.kind) || list.find(x => x.languageCode.startsWith(lang)) || list[0];
@@ -660,9 +660,12 @@ function playerControls(box, p) {
   const rates = () => (p.rates && p.rates().length ? p.rates() : RATES).filter(r => r >= 0.25 && r <= 2);
   const setRate = r => { p.rate(r); setTimeout(update, 50); };
   const fs = () => (document.fullscreenElement === box ? document.exitFullscreen() : box.requestFullscreen()).catch(() => { /* refused */ });
+  // the choice is kept (setting "captions") and applied to the next video too
   const cc = async () => {
     if (!p.captions) return;
     const want = !p.captions();
+    if (B.settings.captions !== want) api('/settings', { captions: want }).then(s => { B.settings = s; }).catch(() => { /* still on for this video */ });
+    B.settings.captions = want;
     const on = await p.captions(want);
     if (want && !on) toast('No captions for this video');
     update();
@@ -741,6 +744,7 @@ function playerControls(box, p) {
   seek.addEventListener('pointercancel', endDrag);
   seek.addEventListener('pointerleave', () => { if (drag === null) tip.hidden = true; });
 
+  if (p.captions && B.settings.captions) p.captions(true).then(update);
   update();
   wake();
   clearInterval(uiTimer);
@@ -1079,6 +1083,7 @@ function pageSetup() {
     ${sw('calm', 'Calm presentation', 'No view counts, and no "new" dots or badges asking for attention. Uploads from followed channels still arrive in your queue.')}
     ${sw('hide_watched', 'Hide played videos', 'Watched videos disappear from the home page, Explore, search, channel pages and related videos instead of showing dimmed. The Library and playlists still list them.')}
     ${sw('dearrow', 'Video frames and plain titles (DeArrow)', 'Show a frame from the video instead of the uploader\'s thumbnail, and the community-written title from <a href="https://dearrow.ajay.app" target="_blank" rel="noopener">DeArrow</a> where one exists. Hover a title to see the original. Video ids are looked up on DeArrow\'s servers (by hash prefix).')}
+    ${NATIVE ? '' : sw('captions', 'Captions', 'Show captions in the player, where the video has them. The CC button and the c key in the player change this too.')}
     ${sw('sponsorblock', 'Skip sponsor segments (SponsorBlock)', 'Sponsor reads, intros, reminders to subscribe and the like, as marked by viewers on <a href="https://sponsor.ajay.app" target="_blank" rel="noopener">SponsorBlock</a>. Each kind is skipped (with an undo), offered with a Skip button, or left alone, as set below. Video ids are looked up by hash prefix; nothing is sent back.')}
     <details class="howto sbcats"><summary>What to do with each kind of segment</summary>
       ${Object.entries(B.sb_cats).map(([k, c]) => `<label class="setting"><span><b><i class="sbdot" style="background:${esc(c.color)}"></i>${esc(c.name)}</b></span>
