@@ -301,6 +301,7 @@ class NativePlayer(private val act: MainActivity) {
         art.visibility = View.VISIBLE
         load(pos, fresh = false)
         note(if (on) "Sound only" else "Picture and sound")
+        act.keepScreenOn(exo.isPlaying && !on)
         act.updatePip()
     }
 
@@ -315,6 +316,7 @@ class NativePlayer(private val act: MainActivity) {
             playing = isPlaying
             playBtn.setImageResource(if (isPlaying) R.drawable.pt_pause else R.drawable.pt_play)
             if (!isPlaying && vid != null) showControls() else poke()
+            act.keepScreenOn(isPlaying && !audioOnly)
             act.updatePip()
         }
 

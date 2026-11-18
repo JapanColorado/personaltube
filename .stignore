@@ -23,6 +23,5 @@
 /downloads
 /state.db
 /state.db-*
-/log.txt
 /.env
 /.stfolder.removed-*

@@ -64,7 +64,9 @@ class MainActivity : Activity() {
     private var controller: ListenableFuture<MediaController>? = null
     var full = false; private set
     var inPip = false; private set
-    private var leftPip = false
+    private var leftPip = false   // out of picture in picture, and not known yet whether expanded or closed
+    private var stopped = false
+    private var askedAccess = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,7 +78,13 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         web?.onResume()
-        if (web == null && !starting) begin()  // back from the system's file access screen
+        leftPip = false  // the picture-in-picture window was expanded, not closed
+        if (web == null && !starting && askedAccess) { askedAccess = false; begin() }  // back from the system's file access screen
+    }
+
+    override fun onStart() {
+        super.onStart()
+        stopped = false
     }
 
     private fun folder(): String = prefs.getString("folder", null) ?: GUESSES.firstOrNull { ok(it) } ?: GUESSES[0]
@@ -90,6 +98,7 @@ class MainActivity : Activity() {
                     "and writes this phone's changes back there. Android asks you to allow that once.",
                 "Allow file access"
             ) {
+                askedAccess = true
                 startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
             }
             !ok(folder()) -> chooseFolder(null)
@@ -260,16 +269,21 @@ class MainActivity : Activity() {
         val box = playerBox ?: return
         box.visibility = if (on) View.VISIBLE else View.GONE
         if (on) {
-            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) full = true
         } else {
-            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            keepScreenOn(false)
             full = false
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             window.attributes = window.attributes.apply { screenBrightness = -1f }  // a swipe's brightness ends with the video
         }
         layoutPlayer()
         updatePip()
+    }
+
+    /** The screen stays lit while a picture plays, and may sleep when it is paused or only sound. */
+    fun keepScreenOn(on: Boolean) {
+        if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     /** The fullscreen button: turns the screen to landscape and back. */
@@ -308,13 +322,17 @@ class MainActivity : Activity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         inPip = isInPictureInPictureMode
-        leftPip = !isInPictureInPictureMode
+        // Closing the window stops the activity, expanding it resumes it; which of onStop and this comes first
+        // on a close differs between Android versions, so both orders end in a pause.
+        leftPip = !isInPictureInPictureMode && !stopped
+        if (!isInPictureInPictureMode && stopped) native?.pause()
         native?.pipMode(inPip)
         layoutPlayer()
     }
 
     override fun onStop() {
         super.onStop()
+        stopped = true
         if (leftPip) native?.pause()  // the picture-in-picture window was closed
         leftPip = false
     }

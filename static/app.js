@@ -5,7 +5,6 @@ const enc = encodeURIComponent;
 
 let B = null;                       // boot data: topics, follows, playlists, counts
 const CARDS = {};                   // vid -> last card object rendered
-try { localStorage.removeItem('pt-filters'); } catch { /* filters used to be global and remembered; now they live in each page's address */ }
 
 const svg = d => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
 const I = {
@@ -38,6 +37,13 @@ const I = {
   dislike: svg('M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z'),
 };
 
+// A page is drawn by the latest route() only. The fetches a page waits for go through fresh() (pg() for a GET):
+// when the user has moved on by the time the answer is here, it throws STALE, which route() swallows, so a slow
+// page never draws over the one that was asked for after it.
+let routeSeq = 0;
+const STALE = new Error('stale');
+const fresh = async promise => { const my = routeSeq; const r = await promise; if (my !== routeSeq) throw STALE; return r; };
+const pg = path => fresh(api(path));
 async function api(path, body, method) {
   const opts = (body !== undefined || method)
     ? { method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}), keepalive: path.startsWith('/progress/') }
@@ -221,7 +227,7 @@ const main = html => { $('#main').innerHTML = html; };
 // outside your usual topics. A short page with an end, not a feed.
 async function pageMix(p) {
   const f = filterParams(p, ['len', 'type', 'area']);
-  const d = await api('/mix?' + qs(f));
+  const d = await pg('/mix?' + qs(f));
   const v = d.lead[0];
   let lead = '';
   if (v) {
@@ -260,7 +266,7 @@ async function pageBrowse(p, o = {}) {
   const page = +p.page || 1;
   const f = filterParams(p, ['len', 'type', 'sort']);
   const base = channel ? `#/channel/${enc(channel)}` : cat ? `#/c/${cat.id}` : area ? `#/a/${area.id}` : '#/browse';
-  const d = await api('/videos?' + qs({ ...f, q, channel, area: cat ? '' : o.area, cat: o.cat, page }));
+  const d = await pg('/videos?' + qs({ ...f, q, channel, area: cat ? '' : o.area, cat: o.cat, page }));
   let h = '', head, after = '';
   if (d.channel) {
     pageTitle = channel;
@@ -306,7 +312,7 @@ async function ytResults(q, len) {
 }
 
 async function pageVideo(vid, autoplay, pl) {
-  const v = await api('/video/' + vid + (pl ? '?pl=' + enc(pl) : ''));
+  const v = await pg('/video/' + vid + (pl ? '?pl=' + enc(pl) : ''));
   if (pl) v.pl = pl;
   CARDS[v.vid] = v;
   pageTitle = ttl(v);
@@ -599,8 +605,7 @@ async function startPlayer(vid) {
   box.innerHTML = '<div id="yt"></div><div class="pshield"></div><div id="sbask"></div>';
   const watch = $('.watch');
   if (watch) watch.classList.add('playing');
-  let start = v.resume || 0;
-  try { start = start || +localStorage.getItem('pt-pos-' + vid) || 0; localStorage.removeItem('pt-pos-' + vid); } catch { /* positions used to live here */ }
+  const start = v.resume || 0;
   let marked = !!v.watched;
   const mark = () => { if (!marked) { marked = true; setWatched(vid, true).catch(fail); } };
   let played = 0, wasPlaying = false, lastTick = Date.now(), lastSent = Date.now(), pos = 0, dur = 0, today = v.today;
@@ -977,7 +982,7 @@ function applyChanFilter() {
 }
 
 async function pageFollowing(tab) {
-  const d = await api('/following');
+  const d = await pg('/following');
   const chans = tab === 'channels';
   const total = d.channels.length;
   if (total <= 12) chanFilter = '';   // the filter box is not drawn then
@@ -1015,7 +1020,7 @@ async function pageFollowing(tab) {
 }
 
 async function pagePlaylists() {
-  const d = await api('/playlists');
+  const d = await pg('/playlists');
   let h = `<div class="pagehead"><h2>Playlists</h2></div>
     <div class="forms">
       <form id="plnew"><input class="field" type="text" name="name" placeholder="New playlist name" aria-label="New playlist name"><button class="pill">Create</button></form>
@@ -1034,7 +1039,7 @@ async function pagePlaylists() {
 }
 
 async function pagePlaylist(id) {
-  const p = await api('/playlists/' + id);
+  const p = await pg('/playlists/' + id);
   pageTitle = p.name;
   let h = `<div class="pagehead headrow"><div><h2>${esc(p.name)}</h2><p class="sub">${p.done} of ${p.items.length} watched</p></div>
     <span class="progress"><i style="width:${p.items.length ? 100 * p.done / p.items.length : 0}%"></i></span><span style="flex:1"></span>
@@ -1079,9 +1084,9 @@ function dayLabel(when) {
 const libraryHead = tab => `<div class="pagehead"><h2>Library</h2></div>
     <div class="tabs"><a href="#/library" class="${tab ? '' : 'on'}">History</a><a href="#/library/liked" class="${tab === 'liked' ? 'on' : ''}">Liked</a><a href="#/library/downloads" class="${tab === 'downloads' ? 'on' : ''}">Downloads</a></div>`;
 async function pageLibrary(tab) {
-  if (tab === 'downloads') { pageTitle = 'Downloads'; return renderDownloads(await api('/downloads')); }
+  if (tab === 'downloads') { pageTitle = 'Downloads'; return renderDownloads(await pg('/downloads')); }
   const liked = tab === 'liked';
-  const d = await api(liked ? '/liked' : '/history');
+  const d = await pg(liked ? '/liked' : '/history');
   pageTitle = liked ? 'Liked' : 'History';
   let h = libraryHead(liked ? 'liked' : '');
   if (liked) {
@@ -1104,7 +1109,7 @@ async function pageLibrary(tab) {
 
 async function pageForYou(p) {
   const f = filterParams(p, ['len', 'type', 'area']);
-  const d = await api('/foryou?' + qs(f));
+  const d = await pg('/foryou?' + qs(f));
   let h = filterBar('#/foryou', {}, f, d.items.length ? `<span class="muted">from ${d.likes} like${d.likes === 1 ? '' : 's'}${d.topics ? ', your topics' : ''} and your history</span>` : '', '<h2>For You</h2>');
   if (d.items.length) h += grid(d.items);
   else if (!d.likes && !d.watched && !d.topics) h += `<p class="empty">Nothing to go on yet. Like a few videos (the thumbs-up on a video's page, or the three-dot menu on any card), mark the topics you want more of on <a class="link" href="#/explore">Explore</a>, or bring your YouTube history in from <a class="link" href="#/setup">Settings</a>.</p>`;
@@ -1219,7 +1224,7 @@ pixi run start          # restart the app; it reads the key from the keyring</pr
 
 // The last seven days, laid out for you to judge rather than to keep you going.
 async function pageReview() {
-  const d = await api('/review');
+  const d = await pg('/review');
   const max = Math.max(...d.days.map(x => x.secs), 1);
   const rated = d.worth + d.not_worth;
   const diff = d.total - d.prev;
@@ -1243,7 +1248,7 @@ async function pageReview() {
 
 // Where "Done for now" leads: nothing to click on.
 async function pageDone() {
-  await reboot();
+  await fresh(reboot());
   main(`<div class="donepage"><h2>That's it for now.</h2>
     ${tallyText(B.tally) ? `<p>${esc(tallyText(B.tally))}.</p>` : ''}
     <p class="muted">Your queue will still be here. You can close this tab.</p>
@@ -1260,6 +1265,7 @@ let pageTitle = '';
 const TITLES = { foryou: 'For You', explore: 'Explore', categories: 'Explore', following: 'Following', playlists: 'Playlists', review: 'Review', setup: 'Settings', done: 'Done for now' };
 
 async function route() {
+  const my = ++routeSeq;
   stopPlayer();
   closePopup();
   pageTitle = '';
@@ -1292,9 +1298,11 @@ async function route() {
     else if (name === 'setup') pageSetup();
     else notFound();
   } catch (e) {
+    if (my !== routeSeq) return clearTimeout(slow);   // a later route() owns the page now
     main(`<p class="note err">${esc(e.message)}</p>`);
   }
   clearTimeout(slow);
+  if (my !== routeSeq) return;
   document.body.classList.remove('loading');
   const title = pageTitle || TITLES[routeName()];
   document.title = title ? `${title} · PersonalTube` : 'PersonalTube';
@@ -1427,11 +1435,16 @@ document.addEventListener('click', async e => {
       const on = t.dataset.on !== '1';
       await api('/follow', { channel: t.dataset.follow, follow: on });
       toast(on ? `Following ${t.dataset.follow}` : `Unfollowed ${t.dataset.follow}`);
-      if (!location.hash.startsWith('#/v/')) return await refresh();
+      const found = t.closest('#chanresults');
+      if (!found && !location.hash.startsWith('#/v/')) return await refresh();
       t.dataset.on = on ? 1 : 0;           // keep the player running: update in place
       t.textContent = on ? 'Following' : 'Follow';
       t.classList.toggle('solid', !on);
-      return await reboot();
+      if (!found) return await reboot();
+      const keep = found.innerHTML;        // a channel search: the list below is redrawn, the results stay
+      await refresh();
+      if ($('#chanresults')) $('#chanresults').innerHTML = keep;
+      return;
     }
     if (t.dataset.addto !== undefined) {
       const on = !t.classList.contains('in'), pid = +t.dataset.addto, pv = pop.dataset.pv, at = popAnchor, ph = popHost;
@@ -1456,8 +1469,17 @@ document.addEventListener('click', async e => {
           markLater(vid, to);
           await (location.hash === '#/playlist/' + B.watch_later ? refresh() : reboot());
         };
+        // taken out on the Watch later playlist's own page: Undo puts it back where it was, as "Remove" does
+        const row = !on && host && +host.dataset.pl === B.watch_later ? host : null, wl = B.watch_later;
+        const before = row && row.nextElementSibling ? row.nextElementSibling.dataset.vid || null : null;
         await set(on);
-        return toast(on ? 'Saved to Watch later' : 'Removed from Watch later', () => set(!on));
+        return toast(on ? 'Saved to Watch later' : 'Removed from Watch later', async () => {
+          if (!row) return set(!on);
+          await api('/later/' + vid, { on: true });
+          await api(`/playlists/${wl}/move`, { vid, before });
+          markLater(vid, true);
+          await refresh();
+        });
       }
       case 'topic': {
         const box = t.closest('.tw'), id = box.dataset.topic, w = +box.dataset.w === +t.dataset.w ? 0 : +t.dataset.w;
@@ -1671,7 +1693,7 @@ document.addEventListener('submit', async e => {
       const r = await api('/channels?q=' + enc(data.q));
       $('#chanresults').innerHTML = r.items.length ? `<div class="rows">${r.items.map(c => channelRow(
         { name: c.name, sub: `${c.count} video${c.count === 1 ? '' : 's'} in the library` },
-        `<button class="pill ${c.followed ? '' : 'solid'}" data-follow="${esc(c.name)}" data-on="${c.followed ? 1 : 0}">${c.followed ? 'Unfollow' : 'Follow'}</button>`)).join('')}</div>`
+        followBtn(c.name, c.followed))).join('')}</div>`
         : '<p class="empty">No channel by that name in the library.</p>';
     }
   } catch (err) { fail(err); }
@@ -1709,8 +1731,8 @@ function playerKey(k) {
     jump: x => player.seek(x * player.dur()),
   };
   const [fn, arg] = PLAYER_KEYS[k] || (/^[0-9]$/.test(k) ? ['jump', k / 10] : []);
-  if (!fn || !c[fn]) return false;
-  c[fn](arg);
+  if (!fn) return false;
+  if (c[fn]) c[fn](arg);   // a player key the phone's player has nothing for still is no page key
   return true;
 }
 // run a data-act on a video as if a button inside its card had been clicked
@@ -1842,6 +1864,8 @@ async function takeoutFiles(picked) {
     else if (TO_WANT.test(file.name)) out.push({ path, size: file.size, open: async () => file });
   }
   if (out.some(f => /youtube/i.test(f.path))) out = out.filter(f => /youtube/i.test(f.path));
+  const big = out.filter(f => f.size > TO_MAX);
+  if (big.length) toast(`Left out, too large to be part of a YouTube export: ${big.map(f => f.path.split('/').pop()).join(', ')}`);
   return out.filter(f => f.size <= TO_MAX);
 }
 

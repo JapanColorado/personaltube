@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.MediaCodec
 import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.os.IBinder
 import org.json.JSONObject
@@ -79,8 +80,18 @@ object Downloads {
         }
     }.toString()
 
+    private class Status(val code: Int) : IOException("YouTube answered $code for the stream")
+
     private fun fetch(vid: String, quality: Int, job: Job) {
-        val i = Extractor.info(vid)
+        try {
+            fetch(vid, quality, job, Extractor.info(vid))
+        } catch (e: IOException) {  // the stream addresses may have run out (the player retries the same way): once more, with new ones
+            if (job.cancel) throw e
+            fetch(vid, quality, job, Extractor.info(vid, fresh = true))
+        }
+    }
+
+    private fun fetch(vid: String, quality: Int, job: Job, i: org.schabi.newpipe.extractor.stream.StreamInfo) {
         val part = File(dir, ".part").apply { mkdirs() }
         val out = File(part, "$vid.mp4")
         val video = Extractor.video(i, quality, mp4Only = true)
@@ -107,54 +118,73 @@ object Downloads {
         meta.writeText(o.put("height", height).put("ts", System.currentTimeMillis() / 1000.0).toString())
     }
 
-    /** Fetches `url` into `to` in CHUNK-sized ranges, reporting the fraction done. */
+    /** Fetches `url` into `to` in CHUNK-sized ranges, reporting the fraction done. A range that breaks off (the
+     *  network dropped) is asked for again from where it stopped, a few times; a refusal is not. */
     private fun get(url: String, to: File, job: Job, progress: (Double) -> Unit) {
         RandomAccessFile(to, "rw").use { f ->
             f.setLength(0)
             var pos = 0L
             var total = -1L
+            var fails = 0
             while (total < 0 || pos < total) {
                 if (job.cancel) throw IOException("cancelled")
+                val before = pos
                 val req = okhttp3.Request.Builder().url(url).header("User-Agent", Net.UA)
                     .header("Range", "bytes=$pos-${pos + CHUNK - 1}").build()
-                Net.client.newCall(req).execute().use { r ->
-                    if (r.code != 206 && r.code != 200) throw IOException("YouTube answered ${r.code} for the stream")
-                    total = when {
-                        r.code == 200 -> r.body?.contentLength() ?: -1
-                        else -> r.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1
-                    }
-                    val body = r.body ?: throw IOException("empty answer from YouTube")
-                    val buf = ByteArray(64 shl 10)
-                    body.byteStream().use { s ->
-                        while (true) {
-                            if (job.cancel) throw IOException("cancelled")
-                            val n = s.read(buf)
-                            if (n < 0) break
-                            f.write(buf, 0, n)
-                            pos += n
-                            if (total > 0) progress(pos.toDouble() / total)
+                try {
+                    Net.client.newCall(req).execute().use { r ->
+                        if (r.code != 206 && r.code != 200) throw Status(r.code)
+                        total = when {
+                            r.code == 200 -> r.body?.contentLength() ?: -1
+                            else -> r.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1
                         }
+                        if (r.code == 200) pos = 0  // the whole file, whatever range was asked for
+                        f.seek(pos)
+                        val body = r.body ?: throw IOException("empty answer from YouTube")
+                        val buf = ByteArray(64 shl 10)
+                        body.byteStream().use { s ->
+                            while (true) {
+                                if (job.cancel) throw IOException("cancelled")
+                                val n = s.read(buf)
+                                if (n < 0) break
+                                f.write(buf, 0, n)
+                                pos += n
+                                if (total > 0) progress(pos.toDouble() / total)
+                            }
+                        }
+                        if (r.code == 200) total = pos  // the whole file came at once
                     }
-                    if (r.code == 200) total = pos  // the whole file came at once
+                } catch (e: Status) {
+                    throw e
+                } catch (e: IOException) {
+                    if (job.cancel || ++fails > 3) throw e
+                    Thread.sleep(1000L * fails)
+                    continue
                 }
                 if (total < 0) throw IOException("YouTube did not say how long the stream is")
+                if (pos == before && pos < total) throw IOException("YouTube sent nothing more of the stream")
+                fails = 0
             }
         }
     }
 
     /** Joins a picture-only and a sound-only MP4 (fragmented, as YouTube serves them) into one plain MP4. */
     private fun mux(video: File, audio: File, out: File) {
-        val muxer = MediaMuxer(out.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        val sources = listOf(video, audio).map { f ->
-            MediaExtractor().apply {
-                setDataSource(f.path)
-                selectTrack(0)
-            }
-        }
+        val sources = ArrayList<MediaExtractor>()
+        var made: MediaMuxer? = null
         try {
-            val tracks = sources.map { muxer.addTrack(it.getTrackFormat(0)) }
+            for (f in listOf(video, audio)) {
+                val ex = MediaExtractor()
+                sources += ex  // first, so that it is released if the file cannot be read
+                ex.setDataSource(f.path)
+                ex.selectTrack(0)
+            }
+            val muxer = MediaMuxer(out.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).also { made = it }
+            val formats = sources.map { it.getTrackFormat(0) }
+            val tracks = formats.map { muxer.addTrack(it) }
             muxer.start()
-            val buf = ByteBuffer.allocate(4 shl 20)
+            // room for the largest sample the streams announce (a 4K key frame can pass 4 MiB)
+            val buf = ByteBuffer.allocate(formats.maxOf { if (it.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) it.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) else 0 }.coerceAtLeast(4 shl 20))
             val info = MediaCodec.BufferInfo()
             sources.forEachIndexed { k, ex ->
                 while (true) {
@@ -168,7 +198,7 @@ object Downloads {
             muxer.stop()
         } finally {
             sources.forEach { it.release() }
-            muxer.release()
+            made?.release()
         }
     }
 }
@@ -212,17 +242,19 @@ class DownloadService : Service() {
         /** Starts the service when a download is asked for; while any run, refreshes its notification; then ends it. */
         fun update(ctx: Context) {
             synchronized(this) {
-                if (ticker?.isAlive == true) return
+                if (ticker != null) return
                 if (active().isEmpty()) return
                 runCatching { ctx.startService(Intent(ctx, DownloadService::class.java)) }
                 ticker = Thread {
                     val nm = ctx.getSystemService(NotificationManager::class.java)
                     while (true) {
                         Thread.sleep(2000)
-                        val n = build(ctx) ?: break
+                        // the last look and the stop are one step, so a download asked for meanwhile starts the service anew
+                        val n = synchronized(this) {
+                            build(ctx).also { if (it == null) { ticker = null; ctx.stopService(Intent(ctx, DownloadService::class.java)) } }
+                        } ?: break
                         runCatching { nm.notify(ID, n) }
                     }
-                    ctx.stopService(Intent(ctx, DownloadService::class.java))
                 }.apply { isDaemon = true; start() }
             }
         }

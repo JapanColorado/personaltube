@@ -14,6 +14,12 @@ Changes are caught by triggers, so the code that writes to the tables does not k
 put and del are settled per row by time: the latest change wins (sync_seen remembers the time of the last
 change to each row, local or not). Every operation can be applied twice without harm, so a device that starts
 over simply reads every file from the top.
+
+A file would grow for ever (the player alone reports its position every few seconds), so a device starts its
+file over once it is twice the size it had after the last time: the new file tells, as changes, the rows this
+device changed last (the others stand in their own devices' files), the rows it deleted, and all of watchlog and
+intents. Its first line, {"start": ...}, is new each time; a reader that finds another first line than it
+remembers reads the file from the top.
 """
 import json
 import os
@@ -29,6 +35,8 @@ TABLES = {"watched": ("vid",), "hidden": ("vid",), "follows": ("channel",), "ext
           "topics": ("id",), "kv": ("k",)}
 NOW = "((julianday('now') - 2440587.5) * 86400.0)"
 INTERVAL = 5  # seconds between passes
+COMPACT_MIN = 1 << 20  # a file smaller than this is never started over
+COMPACT_GROWTH = 2     # ... nor one that has not grown to this many times its size after the last time
 
 SCHEMA = """
 create table if not exists sync_ctl(id integer primary key check (id = 1), dev text, applying integer default 0);
@@ -52,6 +60,10 @@ class Sync:
             c.executescript(SCHEMA)
             if not c.execute("select 1 from sync_ctl").fetchone():
                 c.execute("insert into sync_ctl(id, dev) values(1, ?)", (secrets.token_hex(4),))
+            if "base" not in {r[1] for r in c.execute("pragma table_info(sync_ctl)")}:
+                c.execute("alter table sync_ctl add column base integer")  # size of our file when it was last started over
+            if "head" not in {r[1] for r in c.execute("pragma table_info(sync_in)")}:
+                c.execute("alter table sync_in add column head text")  # first line of the device's file when last read
             c.execute("update sync_ctl set applying=0")
             self.dev = c.execute("select dev from sync_ctl").fetchone()[0]
             self.install(c)
@@ -103,14 +115,20 @@ class Sync:
                   f"json_object('ts', new.ts, 'intent', new.intent), {NOW}); end")
 
     def snapshot(self, c):
-        """Write everything this device holds as changes made now: how a device introduces itself to the others."""
-        c.execute("delete from sync_out where op != 'del'")  # everything else is retold below
+        """Write what this device has to tell as changes: how it introduces itself to the others, and what its
+        file is started over with. That is every row it changed last (or that was there before syncing began) and
+        every deletion it made; a row another device changed last stands in that device's file, unless that file
+        is gone. Each keeps the time of its change, so re-telling it overrides nothing."""
+        c.execute("delete from sync_out")  # everything waiting is retold below
+        others = [f.stem for f in self.folder.glob("*.jsonl") if f.stem != self.dev and ".sync-conflict" not in f.stem]
+        ours = f"(s.dev is null or s.dev not in ({', '.join('?' * len(others))}))"
         for t in TABLES:
             pk, data = self.row_sql(t, t)
-            where = f" where {self.kv_where.format(r='kv')}" if t == "kv" else ""
-            # a row that came from another device keeps the time of that change, so re-telling it overrides nothing
-            c.execute(f"insert into sync_out(tbl, op, pk, data, ts) select '{t}', 'put', {pk}, {data}, "
-                      f"coalesce((select ts from sync_seen s where s.tbl = '{t}' and s.pk = {pk}), {NOW}) from {t}{where}")
+            where = f" and ({self.kv_where.format(r='kv')})" if t == "kv" else ""
+            c.execute(f"insert into sync_out(tbl, op, pk, data, ts) select '{t}', 'put', {pk}, {data}, coalesce(s.ts, {NOW}) "
+                      f"from {t} left join sync_seen s on s.tbl = '{t}' and s.pk = {pk} where {ours}{where}", others)
+            c.execute(f"insert into sync_out(tbl, op, pk, ts) select '{t}', 'del', s.pk, s.ts from sync_seen s "
+                      f"where s.tbl = '{t}' and {ours} and not exists (select 1 from {t} where {pk} = s.pk)", others)
         c.execute("insert or ignore into sync_seen(tbl, pk, ts, dev) select tbl, pk, ts, (select dev from sync_ctl) "
                   "from sync_out where op = 'put'")
         c.execute("insert into sync_out(tbl, op, data, ts) select 'watchlog', 'max', "
@@ -121,19 +139,30 @@ class Sync:
     # ---- writing our file, reading the others
 
     def push(self, c):
-        if not self.mine.exists():
+        over = not self.mine.exists()  # a new device introduces itself
+        if not over:
+            base = c.execute("select base from sync_ctl").fetchone()[0] or 0
+            over = self.mine.stat().st_size > max(COMPACT_MIN, COMPACT_GROWTH * base)
+        if over:
             self.snapshot(c)
-            self.mine.touch()  # so a device with nothing to tell yet does not introduce itself again later
         rows = c.execute("select seq, tbl, op, pk, data, ts from sync_out order by seq").fetchall()
-        if not rows:
+        if not rows and not over:
             return 0
-        with open(self.mine, "a", encoding="utf-8") as f:
+        # started over: written beside the file and moved into place, so no reader ever sees half of it
+        dest = self.mine.with_name(self.mine.name + ".new") if over else self.mine
+        with open(dest, "w" if over else "a", encoding="utf-8") as f:
+            if over:
+                f.write(json.dumps({"start": secrets.token_hex(8)}) + "\n")
             for seq, tbl, op, pk, data, ts in rows:
                 f.write(json.dumps({"seq": seq, "tbl": tbl, "op": op, "pk": pk, "ts": ts,
                                     "data": json.loads(data) if data else None}, separators=(",", ":")) + "\n")
             f.flush()
             os.fsync(f.fileno())
-        c.execute("delete from sync_out where seq <= ?", (rows[-1][0],))
+        if over:
+            os.replace(dest, self.mine)
+            c.execute("update sync_ctl set base = ?", (self.mine.stat().st_size,))
+        if rows:
+            c.execute("delete from sync_out where seq <= ?", (rows[-1][0],))
         return len(rows)
 
     def apply(self, c, ch, dev):
@@ -164,14 +193,15 @@ class Sync:
             dev = f.stem
             if dev == self.dev or ".sync-conflict" in dev:
                 continue
-            row = c.execute("select off, seq from sync_in where dev = ?", (dev,)).fetchone()
-            off, seq = row or (0, 0)
-            size = f.stat().st_size
-            if size == off:
-                continue
-            if size < off:  # the file was started over
-                off = seq = 0
+            row = c.execute("select off, seq, head from sync_in where dev = ?", (dev,)).fetchone()
+            off, seq, was = row or (0, 0, None)
             with open(f, "rb") as fh:
+                head = fh.readline(200).decode("utf-8", "replace")  # names this run of the file (see the top)
+                size = f.stat().st_size
+                if size < off or (was is not None and head != was):  # the file was started over
+                    off = seq = 0
+                if size == off:
+                    continue
                 fh.seek(off)
                 data = fh.read()
             end = data.rfind(b"\n") + 1  # whole lines only
@@ -188,7 +218,8 @@ class Sync:
                 except (ValueError, KeyError, TypeError, sqlite3.Error):
                     continue  # a line this version cannot read is skipped, not fatal
             c.execute("update sync_ctl set applying = 0")
-            c.execute("insert or replace into sync_in(dev, off, seq, ts) values(?,?,?,?)", (dev, off + end, seq, time.time()))
+            c.execute("insert or replace into sync_in(dev, off, seq, ts, head) values(?,?,?,?,?)",
+                      (dev, off + end, seq, time.time(), head))
         return n
 
     def run_once(self):

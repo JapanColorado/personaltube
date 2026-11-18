@@ -1,4 +1,5 @@
 """PersonalTube: a local, personal video front page that works for the viewer.  Run with:  pixi run start"""
+import copy
 import csv
 import difflib
 import hashlib
@@ -42,7 +43,9 @@ if __name__ == "__main__":
     # The launcher. uvicorn imports this file again as "server" in a worker process and restarts that worker
     # whenever a .py file here changes, so the launcher itself stops before the dataset loads.
     print(f"\n  PersonalTube is at  http://127.0.0.1:{PORT}  (restarts itself when the code changes)\n")
-    uvicorn.run("server:app", host="127.0.0.1", port=PORT, log_level="warning", reload=True, reload_dirs=[str(ROOT)])
+    # (not the Python files of the pixi environment and of Android builds: a build must not restart the server)
+    uvicorn.run("server:app", host="127.0.0.1", port=PORT, log_level="warning", reload=True, reload_dirs=[str(ROOT)],
+                reload_excludes=[str(ROOT / d) for d in (".pixi", "android") if (ROOT / d).is_dir()])
     raise SystemExit
 
 # Content types in the daily mix by default (interviews, podcasts and news are filter-only).
@@ -74,6 +77,7 @@ SB_CATS = {"sponsor": ("Sponsor", "skip", "#00d400"), "selfpromo": ("Self-promot
            "filler": ("Tangent or filler", "off", "#7300ff"), "music_offtopic": ("Non-music part of a music video", "ask", "#ff9900")}
 SB_ACTIONS = ("skip", "ask", "off")
 SB_TTL = 86400  # segments are added while a video is new, so ask SponsorBlock again after a day
+SB_KEEP = 30 * 86400  # an older answer still serves when SponsorBlock cannot be reached; after this long it is dropped
 UA = "Mozilla/5.0 (compatible; local-video-app)"
 
 # ---------------------------------------------------------------- dataset
@@ -336,6 +340,30 @@ class State:
         if not e or not e["upload"] or e["channel"] not in self.follows or vid in self.watched:
             return False
         return (e["published"] or "") >= (date.today() - timedelta(days=NEW_DAYS)).isoformat()
+
+
+_snap = (None, 0.0, None)  # (state.db's data_version, when, the State read then)
+_snap_lock = threading.Lock()
+_snap_watch = None        # a connection that never writes: its data_version moves when any other connection commits
+
+
+def snapshot(c):
+    """The user's state as c sees it. Reading it takes tens of milliseconds and a page asks several endpoints in
+    a row, so the last one is kept while nothing has been written to state.db (and for a minute at most: what is
+    "new" or fresh also depends on the clock). A connection with changes of its own not yet committed gets a new
+    one. Nothing may change a State: requests share it."""
+    global _snap, _snap_watch
+    if c.in_transaction:
+        return State(c)
+    with _snap_lock:
+        if _snap_watch is None:
+            _snap_watch = sqlite3.connect(DB, check_same_thread=False)
+        ver = _snap_watch.execute("pragma data_version").fetchone()[0]
+        if _snap[0] != ver or time.time() - _snap[1] > 60:
+            _snap = (ver, time.time(), State(c))
+        st = copy.copy(_snap[2])
+    st.downloads = downloaded()  # files, not rows: state.db does not say when one arrives
+    return st
 
 
 def card(vid, st):
@@ -630,7 +658,7 @@ def build_mix(c, area="", cat="", length="", types=None):
     taste and a few deliberately far from it. It is a fixed, small page, stable for the whole day: each video gets
     a fixed random draw from (date, reshuffle count), so following a channel or watching something only nudges it
     instead of redealing."""
-    st = State(c)
+    st = snapshot(c)
     today = date.today()
     day0 = datetime.combine(today, datetime.min.time()).timestamp()
     seed = f"{today.isoformat()}:{kv_get(c, 'reshuffle:' + today.isoformat(), 0)}"
@@ -763,7 +791,7 @@ def split_types(s):
 def boot():
     load_meta()
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
         areas = [{"id": a["id"], "name": a["name"], "count": AREA_N[a["id"]], "w": st.topics.get(a["id"], 0),
                   "categories": [{"id": x["id"], "name": x["name"], "count": CAT_N[x["id"]],
                                   "w": st.topics.get(x["id"], 0)}
@@ -860,7 +888,7 @@ def videos(q: str = "", area: str = "", cat: str = "", len: str = "", type: str 
     types = split_types(type)
     q = "" if channel or area or cat else q.strip()[:200]
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
 
     def scan(toks):
         hits, rel = [], {}
@@ -990,7 +1018,7 @@ def ytsearch(q: str = "", len: str = ""):
     toks = words(q)
     with db() as c:
         vids = youtube_search(c, q)
-        st = State(c)
+        st = snapshot(c)
     items = []
     for vid in vids:
         if vid in st.hidden or (st.hide_watched and vid in st.watched) or not passes(vid, st, length=len):
@@ -1010,7 +1038,7 @@ def ytsearch(q: str = "", len: str = ""):
 def video(vid: str, pl: int | None = None):
     load_meta()
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
         if not (vid in V or vid in st.extra):
             raise HTTPException(404, "No such video")
         d = card(vid, st)
@@ -1047,9 +1075,9 @@ def video(vid: str, pl: int | None = None):
         v = V[vid]
         order = {"strong_rec": 0, "rec": 1, "reference": 2, "critical": 3, "joke": 4}
         d.update(summary=v["summary"], tags=v.get("tags") or [], categories=v["categories"],
-                 level=v["level"], stats=v["hn"], pub=META.get(vid, {}).get("pub"),
-                 mentions=[{"author": m["author"], "month": m["month"], "stance": m["stance"],
-                            "story": m["story_title"], "url": m["hn_url"], "why": m["why"],
+                 level=v["level"], pub=META.get(vid, {}).get("pub"),
+                 mentions=[{"author": m["author"], "month": m["month"],
+                            "story": m["story_title"], "url": m["hn_url"],
                             "text": m["text"][:700] + ("…" if len(m["text"]) > 700 else "")}
                            for m in sorted(MENTIONS.get(vid, []), key=lambda m: order.get(m["stance"], 9))],
                  related=[card(r, st) for r in RELATED.get(vid, [])
@@ -1111,7 +1139,7 @@ def review():
     days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
     t0 = datetime.combine(today - timedelta(days=6), datetime.min.time()).timestamp()
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
         log = [tuple(r) for r in c.execute("select day, vid, secs from watchlog where day >= ?",
                                            ((today - timedelta(days=13)).isoformat(),))]
         intents = Counter(r[0] for r in c.execute("select intent from intents where ts >= ?", (t0,)))
@@ -1163,7 +1191,7 @@ def rate(vid: str, payload: dict = Body(default={})):
 def liked():
     load_meta()
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
         rows = [tuple(r) for r in c.execute("select vid, rating from ratings order by ts desc")]
     rows = [(v, r) for v, r in rows if v in V or v in st.extra]
     return {"items": [card(v, st) for v, r in rows if r > 0], "disliked": [card(v, st) for v, r in rows if r < 0]}
@@ -1176,7 +1204,7 @@ def foryou(area: str = "", cat: str = "", len: str = "", type: str = ""):
     load_meta()
     types = split_types(type)
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
     t = taste(st)
     ranked = []
     for v in VIDEOS:
@@ -1234,7 +1262,7 @@ def set_settings(payload: dict = Body(...)):
         for k, a in (payload.get("sb") or {}).items():
             if k in SB_CATS and a in SB_ACTIONS:
                 kv_set(c, "sb:" + k, a)
-        return State(c).settings
+        return snapshot(c).settings
 
 
 # ---- DeArrow: crowdsourced plain titles and a representative frame instead of the uploader's thumbnail
@@ -1266,7 +1294,7 @@ def dearrow_lookup(vid):
 @app.post("/api/dearrow")
 def dearrow(payload: dict = Body(...)):
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
     if not st.settings["dearrow"]:
         return {}
     vids = [v for v in dict.fromkeys(payload.get("vids") or [])
@@ -1276,6 +1304,7 @@ def dearrow(payload: dict = Body(...)):
     with db() as c:
         c.executemany("insert or replace into dearrow(vid, title, time, original, ts) values(?,?,?,?,?)",
                       [(v, r["title"], r["time"], int(r["original"]), time.time()) for v, r in got.items()])
+        c.execute("delete from dearrow where ts < ?", (time.time() - DEARROW_TTL,))  # too old to be used: asked again when next on screen
     return got
 
 
@@ -1321,6 +1350,7 @@ def sponsor(vid: str):
         else:
             with db() as c:
                 c.execute("insert or replace into sponsor(vid, segs, ts) values(?,?,?)", (vid, json.dumps(segs), time.time()))
+                c.execute("delete from sponsor where ts < ?", (time.time() - SB_KEEP,))
     return {"segs": [dict(g, act=acts[g["cat"]], name=SB_CATS[g["cat"]][0], color=SB_CATS[g["cat"]][2])
                      for g in segs if acts.get(g["cat"]) in ("skip", "ask")]}
 
@@ -1419,7 +1449,7 @@ def download_start(vid: str):
     global DL_WORKER
     load_meta()
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
     if not st.available(vid):
         raise HTTPException(404, "No such video")
     if vid in st.downloads:
@@ -1482,7 +1512,7 @@ def downloads():
         except OSError:
             pass
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
     jobs = dl_jobs()
 
     def info(vid):
@@ -1569,7 +1599,7 @@ def media(vid: str, request: Request, save: int = 0):
 @app.get("/api/history")
 def history():
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
     # newest first, 300 at most; rows from a Takeout file without readable dates carry tiny timestamps and no day
     rows = sorted(((v, t) for v, t in st.watched.items() if v in V or v in st.extra), key=lambda x: -x[1])[:300]
     return {"items": [dict(card(v, st), when=datetime.fromtimestamp(t).strftime("%Y-%m-%d") if t > 86400 * 365 else "")
@@ -1583,7 +1613,7 @@ def history():
 def channels(q: str = ""):
     ql = q.lower().strip()
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
     names = [n for n in BY_CHANNEL if ql in n.lower()] if ql else list(BY_CHANNEL)
     names.sort(key=lambda n: -len(BY_CHANNEL[n]))
     return {"items": [{"name": n, "count": len(BY_CHANNEL[n]), "followed": n in st.follows} for n in names[:30]]}
@@ -1663,7 +1693,7 @@ def subs_names(pairs):
 
 def follow_subs(c, subs):
     """Follow the (channel id, name) pairs not followed yet; returns how many that was."""
-    st = State(c)
+    st = snapshot(c)
     ids = set(st.follows.values())
     new = {n: cid for cid, n in subs if n not in st.follows and cid not in ids}
     c.executemany("insert or ignore into follows(channel, channel_id, ts) values(?,?,?)",
@@ -1677,7 +1707,7 @@ def follow_subs(c, subs):
 def following():
     load_meta()
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
         checked = {r[0]: r[1] for r in c.execute("select channel, checked_ts from follows")}
     chans = []
     for n in sorted(st.follows, key=str.lower):
@@ -1711,7 +1741,7 @@ def playlist_detail(c, pid, st=None):
     p = c.execute("select * from playlists where id=?", (pid,)).fetchone()
     if not p:
         raise HTTPException(404, "No such playlist")
-    st = st or State(c)
+    st = st or snapshot(c)
     vids = [r[0] for r in c.execute("select vid from items where playlist_id=? order by pos", (pid,))]
     pending = sum(v not in V and v not in st.extra for v in vids)  # imported without a key: no details yet
     vids = [v for v in vids if st.available(v)]
@@ -1724,7 +1754,7 @@ def playlist_detail(c, pid, st=None):
 def playlists():
     load_meta()
     with db() as c:
-        out, st = [], State(c)  # one snapshot for all of them
+        out, st = [], snapshot(c)  # one snapshot for all of them
         for r in c.execute("select id from playlists order by ts").fetchall():
             d = playlist_detail(c, r[0], st)
             d["next"] = next((i for i in d["items"] if i["vid"] == d["next"]), None)
@@ -1886,7 +1916,7 @@ def playlists_preview(c, st, lists):
     for i, p in enumerate(lists):
         pid = takeout_match(c, p)
         have = {r[0] for r in c.execute("select vid from items where playlist_id=?", (pid,))} if pid else set()
-        out.append({"i": i, "name": p["name"], "total": len(p["vids"]), "hn": sum(v in V for v in p["vids"]),
+        out.append({"i": i, "name": p["name"], "total": len(p["vids"]),
                     "unknown": sum(v not in V and v not in st.extra for v in p["vids"]),
                     "existing": pid, "new": sum(v not in have for v in p["vids"])})
     out.sort(key=lambda p: (p["existing"] is not None and not p["new"], p["name"].lower()))
@@ -2122,7 +2152,7 @@ def takeout_summary(token: str):
                                  "or files from its \"YouTube and YouTube Music\" folder.")
     out = {}
     with db() as c:
-        st = State(c)
+        st = snapshot(c)
         if hist:
             dated = sorted(ts for ts in hist.values() if ts > 86400 * 365)
             day = lambda ts: datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
@@ -2131,7 +2161,7 @@ def takeout_summary(token: str):
                               "first": day(dated[0]) if dated else None, "last": day(dated[-1]) if dated else None}
         if likes:
             new = [v for v in likes if v not in st.ratings]
-            out["likes"] = {"videos": len(likes), "new": len(new), "library": sum(v in V for v in new)}
+            out["likes"] = {"videos": len(likes), "new": len(new)}
         if t["subs"]:
             ids = set(st.follows.values())
             items = [{"id": cid, "name": n, "hn": sum(v not in DUPES for v in BY_CHANNEL.get(n, [])),

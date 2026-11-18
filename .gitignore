@@ -16,6 +16,5 @@ android/keystore.properties
 *.jks
 *.keystore
 
-# Syncthing folder marker and stray server output
+# Syncthing folder marker
 .stfolder/
-log.txt

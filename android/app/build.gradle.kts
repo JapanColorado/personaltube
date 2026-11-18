@@ -11,11 +11,12 @@ plugins {
 // are not packed in; they are read from the project folder that Syncthing keeps on the phone, so a change made on
 // the desktop reaches the phone without a new build.
 
-// Commit count of HEAD (CI checks out full history, so local and CI builds agree); 1 outside git.
+// Commit count of HEAD (CI checks out full history, so local and CI builds agree); 1 outside git. In CI a failure
+// stops the build: a release numbered 1 would be published and would then stand in the way of every later one.
 val gitCommitCount: Int = runCatching {
     providers.exec { commandLine("git", "rev-list", "--count", "HEAD") }
         .standardOutput.asText.get().trim().toInt()
-}.getOrDefault(1)
+}.getOrElse { if (System.getenv("CI") != null) throw GradleException("git rev-list failed in CI; refusing to build version 1", it) else 1 }
 
 android {
     namespace = "dev.russell.personaltube"
@@ -89,7 +90,7 @@ chaquopy {
             install("fastapi==0.99.1")
             install("pydantic==1.10.21")
             install("uvicorn==0.34.0")
-            install("numpy")
+            install("numpy==1.26.2")  // what Chaquopy has a build of; server.py keeps to what works there and on the desktop's numpy 2
         }
     }
 }
