@@ -249,6 +249,16 @@ main { margin-left: 240px; padding: 56px 24px 48px; min-height: 100vh; }
    (by then the title YouTube shows as a video starts is gone, and with no pointer reaching the frame nothing returns) */
 .player.cc iframe#yt { height: min(100cqh, 100cqw * 9 / 16); }
 .pshield { position: absolute; inset: 0; z-index: 1; }
+/* a hole in the shield, over the corner of YouTube's frame where a speed-controller extension draws its badge
+   (15px in, 70px down the frame, of which 72px are cut off above the box unless captions are on) */
+@media (hover: hover) {
+  .player iframe#yt ~ .pshield {
+    --hx: calc((100cqw - min(100cqw, 100cqh * 16 / 9)) / 2); --hy: calc((100cqh - min(100cqh, 100cqw * 9 / 16)) / 2 - 12px);
+    clip-path: polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, var(--hx) var(--hy), calc(var(--hx) + 250px) var(--hy),
+                       calc(var(--hx) + 250px) calc(var(--hy) + 44px), var(--hx) calc(var(--hy) + 44px), var(--hx) var(--hy));
+  }
+  .player.cc iframe#yt ~ .pshield { --hy: calc((100cqh - min(100cqh, 100cqw * 9 / 16)) / 2 + 60px); }
+}
 .player.idle, .player.idle .pshield { cursor: none; }
 .pbar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; padding: 32px 12px 2px; color: #fff;
         background: linear-gradient(transparent, rgba(0,0,0,.75)); transition: opacity .2s; --pacc: #3fcfb9; }

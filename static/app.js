@@ -436,17 +436,76 @@ function stopScreen(vid, today) {
       <button class="pill" data-act="play">${I.refresh} Replay</button></div></div>`;
 }
 
+// The language a video is spoken in, as far as the script of its title tells (the app knows nothing better).
+const titleLang = s => /[\u3040-\u30ff]/.test(s) ? 'ja' : /[\uac00-\ud7af]/.test(s) ? 'ko' : /[\u4e00-\u9fff]/.test(s) ? 'zh' : '';
+function saveCaptions(on) {
+  if (B.settings.captions === on) return;
+  B.settings.captions = on;
+  api('/settings', { captions: on }).then(s => { B.settings = s; }).catch(() => { /* still so for this video */ });
+}
+
 function ytBackend(vid, start, on) {
   return loadYT().then(YT => new Promise((res, rej) => {
     if (!$('#yt')) return rej(new Error('gone'));   // navigated away while the player script loaded
+    // Captions. The IFrame API's captions module is undocumented, and YouTube has ideas of its own: it switches
+    // captions on unasked on some videos (dubbed ones, with a track made from the dubbing), and c pressed in the
+    // frame toggles them without asking the page. The player says what shows through its "captionschanged"
+    // event (`cur`; getOption only knows the state at the last onApiChange), and `sync()` settles that against
+    // what the user wants: while the video starts the player is made to follow the setting, after that a change
+    // is the user's own and the setting follows. Either way the track is the video's own language, untranslated.
+    let want = !!B.settings.captions, cur = null, last = null, startedAt = 0, fixes = 0, busy = false;
+    const lang = titleLang((CARDS[vid] || {}).title || '');
+    const opt = (name, to) => { try { return to === undefined ? p.getOption('captions', name) : p.setOption('captions', name, to); } catch { return null; } };
+    // (settled a moment later: a change of track is reported as off, then on)
+    let settle = null;
+    const seen = t => { cur = t && t.languageCode ? t : null; last = cur || last; clearTimeout(settle); settle = setTimeout(sync, 400); };
+    const ccOff = () => { opt('track', {}); try { p.unloadModule('captions'); } catch { /* not loaded */ } };
+    // a written track in the video's language if the page was told of one, else that language by name, which
+    // also finds the automatic track (the list the page gets leaves those out)
+    const own = () => {
+      if (!cur || fixes > 5) return;
+      const real = lang && (opt('tracklist') || []).find(x => x.languageCode.startsWith(lang));
+      const ok = !cur.translationLanguage && (!lang || cur.languageCode.startsWith(lang)) && (!real || cur.kind !== 'asr');
+      if (ok) return;
+      fixes++;
+      opt('track', real || { languageCode: lang || cur.languageCode });
+    };
+    const ccOn = () => new Promise(done => {
+      try { p.loadModule('captions'); } catch { return done(false); }
+      busy = true;
+      let n = 0;
+      const look = setInterval(() => {
+        // loaded but showing nothing (they were switched off before): name a track
+        if (!cur && ++n === 4) opt('track', lang ? { languageCode: lang } : last || (opt('tracklist') || [])[0] || {});
+        if (!cur && n < 24) return;
+        clearInterval(look);
+        busy = false;
+        own();
+        done(!!cur);
+      }, 250);
+    });
+    const sync = () => {
+      if (busy) return;
+      if (!!cur === want) return own();
+      if (!startedAt || Date.now() - startedAt < 3000) {      // YouTube's doing, as the video starts
+        if (fixes++ < 6) want ? ccOn() : ccOff();
+      } else {                                                 // the user's, with c in the frame
+        want = !!cur;
+        saveCaptions(want);
+        own();
+      }
+    };
     const p = new YT.Player('yt', {
-      host: 'https://www.youtube-nocookie.com', videoId: vid, width: '100%', height: '100%',
-      // controls=0: the app draws its own bar (playerControls), which also keeps YouTube's "More videos" shelf away
-      playerVars: { autoplay: 1, rel: 0, playsinline: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3, start: Math.floor(start) },
+      // www.youtube.com rather than youtube-nocookie.com: the frame then carries the YouTube login, which gets
+      // it past the "confirm you're not a bot" check YouTube puts on VPN addresses (and it shows as error 150).
+      host: 'https://www.youtube.com', videoId: vid, width: '100%', height: '100%',
+      // controls=0: the app draws its own bar (playerControls), which also keeps YouTube's "More videos" shelf away.
+      // YouTube's keys stay on: while the frame has the keyboard (see `focus`) they are the player's keys.
+      playerVars: { autoplay: 1, rel: 0, playsinline: 1, controls: 0, fs: 0, iv_load_policy: 3, start: Math.floor(start) },
       events: {
         onReady: () => {
           if (B.speed !== 1) p.setPlaybackRate(B.speed);
-          let cc = false;
+          if (want) ccOn();
           res({
             time: () => p.getCurrentTime ? p.getCurrentTime() : 0, dur: () => p.getDuration ? p.getDuration() : 0,
             playing: () => p.getPlayerState && p.getPlayerState() === YT.PlayerState.PLAYING,
@@ -456,34 +515,31 @@ function ytBackend(vid, start, on) {
             vol: x => x === undefined ? p.getVolume() / 100 : p.setVolume(Math.round(x * 100)),
             muted: m => m === undefined ? p.isMuted() : m ? p.mute() : p.unMute(),
             loaded: () => p.getVideoLoadedFraction(),
-            // the IFrame API's captions module is undocumented: load it and pick a track, or unload it.
-            // Resolves to whether captions are now on (false when the video has none).
-            captions: on => {
-              if (on === undefined) return cc;
-              if (!on) { cc = false; try { p.setOption('captions', 'track', {}); p.unloadModule('captions'); } catch { /* not loaded */ } return Promise.resolve(false); }
-              try { p.loadModule('captions'); } catch { return Promise.resolve(false); }
-              return new Promise(done => {
-                let n = 0;
-                const look = setInterval(() => {
-                  let list = [];
-                  try { list = p.getOption('captions', 'tracklist') || []; } catch { /* not ready */ }
-                  if (!list.length && ++n < 24) return;
-                  clearInterval(look);
-                  const lang = (navigator.language || 'en').slice(0, 2);
-                  const t = list.find(x => x.languageCode === lang && !x.kind) || list.find(x => x.languageCode.startsWith(lang)) || list[0];
-                  if (t) try { p.setOption('captions', 'track', { languageCode: t.languageCode }); } catch { /* keep the default */ }
-                  cc = !!t;
-                  done(cc);
-                }, 250);
-              });
+            // captions(): whether they show; captions(on): switch them, resolving to whether they now show
+            // (false when the video has none)
+            captions: to => {
+              if (to === undefined) return !!cur;
+              want = to;
+              if (!to) { ccOff(); return Promise.resolve(false); }
+              return ccOn();
             },
-            destroy: () => p.destroy(),
+            // The keyboard goes into the frame, where a browser extension that works on the <video> itself (a
+            // speed controller, say) listens, and where YouTube's own keys do the playing. A click elsewhere
+            // on the page takes it back.
+            focus: () => { const f = p.getIframe(); if (f && document.activeElement !== f) f.focus({ preventScroll: true }); },
+            destroy: () => { clearTimeout(settle); p.destroy(); },
           });
         },
-        onStateChange: e => { on.tick(); if (e.data === YT.PlayerState.ENDED) on.ended(); },
-        onError: () => on.error("YouTube won't play this one here (the uploader may have turned off embedding, or it is gone)."),
+        onApiChange: () => { if (p.getOptions().includes('captions')) seen(opt('track')); },
+        onStateChange: e => {
+          if (e.data === YT.PlayerState.PLAYING && !startedAt) startedAt = Date.now();
+          on.tick();
+          if (e.data === YT.PlayerState.ENDED) on.ended();
+        },
+        onError: () => on.error("YouTube won't play this one here (the uploader may have turned off embedding, it is gone, or YouTube wants a sign-in to prove you're not a bot)."),
       },
     });
+    p.addEventListener('captionschanged', e => seen(e && e.data));
   }));
 }
 
@@ -664,8 +720,7 @@ function playerControls(box, p) {
   const cc = async () => {
     if (!p.captions) return;
     const want = !p.captions();
-    if (B.settings.captions !== want) api('/settings', { captions: want }).then(s => { B.settings = s; }).catch(() => { /* still on for this video */ });
-    B.settings.captions = want;
+    saveCaptions(want);
     const on = await p.captions(want);
     if (want && !on) toast('No captions for this video');
     update();
@@ -682,12 +737,15 @@ function playerControls(box, p) {
   let touch = false;
   const shield = $('.pshield', box);
   shield.addEventListener('pointerdown', e => { touch = e.pointerType === 'touch'; });
-  shield.addEventListener('click', () => {
+  // (the play or pause waits a moment, so that a double click, which is for fullscreen, does neither)
+  let clickT = null;
+  shield.addEventListener('click', e => {
     if (!menu.hidden) return closeMenu();
     if (touch && box.classList.contains('idle')) return wake();
-    toggle();
+    clearTimeout(clickT);
+    if (e.detail < 2) clickT = setTimeout(toggle, 220);
   });
-  shield.addEventListener('dblclick', fs);
+  shield.addEventListener('dblclick', () => { clearTimeout(clickT); fs(); });
   box.addEventListener('mousemove', () => wake(), sig);
   box.addEventListener('mouseleave', () => { if (p.playing() && drag === null && menu.hidden) box.classList.add('idle'); }, sig);
   // buttons don't take the focus from a click, so Space and the other keys stay with the player
@@ -706,8 +764,11 @@ function playerControls(box, p) {
     else if (k === 'cc') cc();
   });
   vol.addEventListener('input', () => setVol(vol.value / 100));
-  vol.addEventListener('change', () => vol.blur());
-  document.addEventListener('fullscreenchange', update, sig);
+  vol.addEventListener('change', () => { vol.blur(); grab(); });
+  document.addEventListener('fullscreenchange', () => { update(); grab(); }, sig);
+  // a click on the video or its bar hands the keyboard to the video (YouTube's frame; see ytBackend's focus)
+  const grab = () => { if (p.focus && player === p) p.focus(); };
+  box.addEventListener('click', e => { if (!e.target.closest('input')) grab(); }, sig);
 
   // the seek bar: drag to seek, hover for the time (and the segment) under the pointer
   const frac = e => { const r = seek.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
@@ -744,9 +805,9 @@ function playerControls(box, p) {
   seek.addEventListener('pointercancel', endDrag);
   seek.addEventListener('pointerleave', () => { if (drag === null) tip.hidden = true; });
 
-  if (p.captions && B.settings.captions) p.captions(true).then(update);
   update();
   wake();
+  grab();
   clearInterval(uiTimer);
   uiTimer = setInterval(update, 250);
   return {
@@ -1628,7 +1689,7 @@ const KEY_ACT = { w: 'later', m: 'seen', l: 'like', p: 'watch' };
 let goAt = 0;
 // While a video plays, its keys are YouTube's: they take over j, k, l and m from the page until it stops.
 const PLAYER_KEYS = {
-  ' ': ['toggle'], k: ['toggle'], j: ['seekBy', -10], l: ['seekBy', 10], ArrowLeft: ['seekBy', -10], ArrowRight: ['seekBy', 10],
+  ' ': ['toggle'], k: ['toggle'], j: ['seekBy', -10], l: ['seekBy', 10], ArrowLeft: ['seekBy', -5], ArrowRight: ['seekBy', 5],
   ArrowUp: ['volBy', 0.05], ArrowDown: ['volBy', -0.05], m: ['mute'], f: ['fs'], c: ['cc'], '<': ['rateBy', -1], '>': ['rateBy', 1],
 };
 function playerKey(k) {
