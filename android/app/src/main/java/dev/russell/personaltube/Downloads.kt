@@ -11,7 +11,6 @@ import android.content.pm.ServiceInfo
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaMuxer
-import android.os.Build
 import android.os.IBinder
 import org.json.JSONObject
 import java.io.File
@@ -40,6 +39,8 @@ object Downloads {
     fun init(ctx: Context) {
         app = ctx.applicationContext
         dir = File(app.getExternalFilesDir(null) ?: app.filesDir, "downloads").apply { mkdirs() }
+        // pieces of downloads that were under way when the app was last killed (not when only the screen was reopened)
+        if (jobs.isEmpty()) File(dir, ".part").listFiles()?.forEach { it.delete() }
     }
 
     fun file(vid: String) = File(dir, "$vid.mp4").takeIf { it.isFile }
@@ -182,7 +183,7 @@ class DownloadService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (Build.VERSION.SDK_INT >= 29) startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) else startForeground(ID, n)
+        startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         return START_NOT_STICKY
     }
 

@@ -91,7 +91,6 @@ for _v in VIDEOS:
     _seen.add(_k)
 
 
-
 def words(s):
     return re.findall(r"\w+", (s or "").casefold())
 
@@ -129,6 +128,7 @@ def relevance(toks, fields):
     if len(toks) > 1 and " ".join(toks) in fields[3]:
         total += 2.0
     return total
+
 
 RELATED = {}
 for _line in open(ROOT / "related.jsonl", encoding="utf-8"):
@@ -341,12 +341,8 @@ class State:
 def card(vid, st):
     if vid in V:
         v = V[vid]
-        cats = v["categories"]
-        q = v.get("quote") or {}
         d = {"vid": vid, "title": v["title"], "channel": v["channel"], "why": v["why_hn"],
-             "type": v["content_type"], "cat": cats[0]["name"] if cats else None,
-             "quote": q.get("text"), "qyear": q.get("year"), "score": v["score"],
-             "recs": v["hn"]["recommenders"], "hn": True,
+             "type": v["content_type"], "hn": True,
              "pub": META.get(vid, {}).get("pub"), "views": META.get(vid, {}).get("views")}
     else:
         e = st.extra[vid]
@@ -589,7 +585,7 @@ def taste_reason(t, vid, weak=True):
 
 
 def topic_weight(vid, st):
-    """-1..1: how much the user asked for more or less of this video's topics on the Categories page. A setting on
+    """-1..1: how much the user asked for more or less of this video's topics on the Explore page. A setting on
     a category overrides the one on its area; the video's first category counts double."""
     if not st.topics or vid not in V:
         return 0.0
@@ -746,12 +742,16 @@ def build_mix(c, area="", cat="", length="", types=None):
         reasons.setdefault(v, {"kind": "continue", "text": "Continue watching"})
     # One large pick, then a single grid: the user's own things first, then suggestions, then the far ones.
     return {"lead": out(picks[:1]), "items": out(cont + queue + picks[1:] + branch),
-            "date": today.isoformat(), "today": today_tally(c)}
+            "today": today_tally(c)}
 
 
 # ---------------------------------------------------------------- API
 
 app = FastAPI(title="PersonalTube")
+# what /api/boot says about the library itself, counted once: videos per area and category, content types by frequency
+AREA_N = Counter(a for v in VIDEOS for a in {x["area"] for x in v["categories"]})
+CAT_N = Counter(x["id"] for v in VIDEOS for x in v["categories"])
+TYPES = [t for t, _ in Counter(v["content_type"] for v in VIDEOS).most_common()]
 
 
 def split_types(s):
@@ -764,14 +764,8 @@ def boot():
     load_meta()
     with db() as c:
         st = State(c)
-        area_n, cat_n = Counter(), Counter()
-        for v in VIDEOS:
-            for a in {x["area"] for x in v["categories"]}:
-                area_n[a] += 1
-            for x in v["categories"]:
-                cat_n[x["id"]] += 1
-        areas = [{"id": a["id"], "name": a["name"], "count": area_n[a["id"]], "w": st.topics.get(a["id"], 0),
-                  "categories": [{"id": x["id"], "name": x["name"], "count": cat_n[x["id"]],
+        areas = [{"id": a["id"], "name": a["name"], "count": AREA_N[a["id"]], "w": st.topics.get(a["id"], 0),
+                  "categories": [{"id": x["id"], "name": x["name"], "count": CAT_N[x["id"]],
                                   "w": st.topics.get(x["id"], 0)}
                                  for x in a["categories"]]} for a in TAXONOMY["areas"]]
         new_by = Counter(e["channel"] for e in st.extra.values() if st.is_new(e["vid"]))
@@ -781,8 +775,7 @@ def boot():
             pls.append({"id": p["id"], "name": p["name"], "total": len(vids),
                         "done": sum(v in st.watched for v in vids)})
         return {"areas": areas,
-                "types": [t for t, _ in Counter(v["content_type"] for v in VIDEOS).most_common()],
-                "default_types": sorted(DEFAULT_TYPES),
+                "types": TYPES,
                 "has_meta": sum(1 for m in META.values() if m.get("dur")),
                 "has_key": bool(os.environ.get("YOUTUBE_API_KEY")),
                 "total": len(VIDEOS), "watched": sum(v in V for v in st.watched),
@@ -814,6 +807,7 @@ def reshuffle():
     with db() as c:
         k = "reshuffle:" + date.today().isoformat()
         kv_set(c, k, int(kv_get(c, k, 0)) + 1)
+        c.execute("delete from kv where k like 'reshuffle:%' and k < ?", (k,))  # earlier days' counts are never read again
     return {"ok": True}
 
 
@@ -948,7 +942,7 @@ def videos(q: str = "", area: str = "", cat: str = "", len: str = "", type: str 
 
 def forget_old_searches(c):
     """Drop searches older than YT_SEARCH_KEEP, and the videos only they brought in: extras that are in no
-    playlist, were never watched, rated or hidden, and are in no search still kept."""
+    playlist, were never started, watched, rated or hidden, and are in no search still kept."""
     old = c.execute("select vids from ytsearch where ts < ?", (time.time() - YT_SEARCH_KEEP,)).fetchall()
     if not old:
         return
@@ -956,7 +950,7 @@ def forget_old_searches(c):
     gone = {v for r in old for v in json.loads(r[0])}
     for r in c.execute("select vids from ytsearch"):
         gone -= set(json.loads(r[0]))
-    for t in ("items", "watched", "ratings", "hidden"):
+    for t in ("items", "watched", "ratings", "hidden", "progress"):
         gone -= {r[0] for r in c.execute(f"select vid from {t}")}
     gone -= downloaded()
     c.executemany("delete from extra where vid=? and upload=0", [(v,) for v in gone])
@@ -1414,6 +1408,8 @@ def dl_worker():
             with DL_LOCK:
                 if job.get("cancel"):
                     DL_JOBS.pop(vid, None)
+                    for f in (DL_DIR / ".part").glob(f"{vid}.*"):  # a failed one keeps its pieces, to go on from
+                        f.unlink(missing_ok=True)
                 else:
                     job.update(state="error", error=re.sub(r"^ERROR:\s*(\[\w+\]\s*\S+:\s*)?", "", str(e))[:300])
 
@@ -1430,8 +1426,9 @@ def download_start(vid: str):
         return {"state": "done"}
     d = card(vid, st)
     DL_DIR.mkdir(parents=True, exist_ok=True)
-    (DL_DIR / f"{vid}.json").write_text(json.dumps({"title": d["title"], "channel": d["channel"], "dur": d["dur"]}))
+    meta = json.dumps({"title": d["title"], "channel": d["channel"], "dur": d["dur"]})
     if NATIVE is not None:
+        (DL_DIR / f"{vid}.json").write_text(meta)
         NATIVE.download(vid, st.dl_quality)
         return {"state": "queued"}
     with DL_LOCK:
@@ -1439,6 +1436,7 @@ def download_start(vid: str):
         if j and j["state"] in ("queued", "running") and not j.get("cancel"):
             return {"state": j["state"]}
         DL_JOBS[vid] = {"state": "queued", "frac": 0.0}
+        (DL_DIR / f"{vid}.json").write_text(meta)  # with the job, so dl_sweep() never sees one without the other
         DL_QUEUE.append((vid, st.dl_quality))
         if not (DL_WORKER and DL_WORKER.is_alive()):
             DL_WORKER = threading.Thread(target=dl_worker, daemon=True, name="downloads")
@@ -1465,9 +1463,24 @@ def download_remove(vid: str):
     return {"ok": True}
 
 
+def dl_sweep():
+    """Desktop: drop what failed or interrupted downloads left behind. Jobs live in memory, so after a restart
+    nothing else remembers their <vid>.json and their pieces in .part (the phone clears its own, Downloads.kt)."""
+    with DL_LOCK:
+        for f in [*DL_DIR.glob("*.json"), *(DL_DIR / ".part").glob("*")]:
+            vid = f.name.split(".")[0]
+            if vid not in DL_JOBS and (f.parent != DL_DIR or not (DL_DIR / f"{vid}.mp4").is_file()):
+                f.unlink(missing_ok=True)
+
+
 @app.get("/api/downloads")
 def downloads():
     load_meta()
+    if NATIVE is None:
+        try:
+            dl_sweep()
+        except OSError:
+            pass
     with db() as c:
         st = State(c)
     jobs = dl_jobs()
@@ -1694,11 +1707,11 @@ def yt_key_check():
 
 # ---- playlists
 
-def playlist_detail(c, pid):
+def playlist_detail(c, pid, st=None):
     p = c.execute("select * from playlists where id=?", (pid,)).fetchone()
     if not p:
         raise HTTPException(404, "No such playlist")
-    st = State(c)
+    st = st or State(c)
     vids = [r[0] for r in c.execute("select vid from items where playlist_id=? order by pos", (pid,))]
     pending = sum(v not in V and v not in st.extra for v in vids)  # imported without a key: no details yet
     vids = [v for v in vids if st.available(v)]
@@ -1711,9 +1724,9 @@ def playlist_detail(c, pid):
 def playlists():
     load_meta()
     with db() as c:
-        out = []
+        out, st = [], State(c)  # one snapshot for all of them
         for r in c.execute("select id from playlists order by ts").fetchall():
-            d = playlist_detail(c, r[0])
+            d = playlist_detail(c, r[0], st)
             d["next"] = next((i for i in d["items"] if i["vid"] == d["next"]), None)
             d["total"] = len(d.pop("items"))
             out.append(d)
@@ -1830,37 +1843,33 @@ def loose(s):
 
 
 def parse_takeout(files):
-    lists, ids, empty = [], {}, []
+    lists, ids = [], {}
     for f in files:
         fname = str(f.get("name") or "")
         try:
             rows = [[x.strip() for x in row] for row in csv.reader(io.StringIO(str(f.get("csv") or "").lstrip("﻿")))]
         except csv.Error:
-            empty.append(fname)
             continue
         # a playlist row is the video id and when it was added; other Takeout CSVs that start with a video id
         # (the metadata of your own uploads, for one) carry more columns
         vids = list(dict.fromkeys(r[0] for r in rows if r and YT_VID.fullmatch(r[0])
                                   and sum(bool(x) for x in r) <= 2))[:TAKEOUT_MAX_VIDEOS]
-        own, index = None, False
+        own = None
         for r in rows:
             pl = next((x for x in r if YT_PLAYLIST.fullmatch(x)), None)
             if pl and vids:
                 own = own or pl
             elif pl:  # a row of the index: remember the id under every other cell, one of which is the title
-                index = True
                 for x in r:
                     if x != pl and loose(x):
                         ids.setdefault(loose(x), (pl, x))
         name = re.sub(r"-videos$", "", re.sub(r"\.csv$", "", fname.rsplit("/", 1)[-1], flags=re.I)).strip()[:120]
         if vids:
             lists.append({"name": name or "Imported playlist", "yt_id": own, "vids": vids})
-        elif not index:
-            empty.append(fname)
     for p in lists:  # file names are sanitised titles; the index has the id and the title as written
         if not p["yt_id"] and loose(p["name"]) in ids:
             p["yt_id"], p["name"] = ids[loose(p["name"])][0], ids[loose(p["name"])][1][:120]
-    return lists, empty
+    return lists
 
 
 def takeout_match(c, p):
@@ -1898,7 +1907,8 @@ def import_playlists(c, lists):
         pid = takeout_match(c, p)
         if pid:
             order = [r[0] for r in c.execute("select vid from items where playlist_id=? order by pos", (pid,))]
-            add = [v for v in vids if v not in set(order)]
+            have = set(order)
+            add = [v for v in vids if v not in have]
             if p["yt_id"]:
                 c.execute("update playlists set yt_id=? where id=? and yt_id is null", (p["yt_id"], pid))
             out["updated"] += bool(add)
@@ -2022,7 +2032,7 @@ def parse_history(data):
     """(video id, timestamp or None) for each video in a Takeout watch history, newest first, once per video.
     Advertisements and YouTube Music plays are left out."""
     text = data.decode("utf-8", "replace").lstrip("\ufeff").lstrip()
-    rows, entries = {}, 0
+    rows = {}
     if text[:1] == "[":
         try:
             items = json.loads(text)
@@ -2040,7 +2050,6 @@ def parse_history(data):
                 ts = datetime.fromisoformat(str(r.get("time")).replace("Z", "+00:00")).timestamp()
             except ValueError:
                 ts = None
-            entries += 1
             rows.setdefault(m.group(1), ts)
     else:
         for m in re.finditer(r'href="https?://www\.youtube\.com/watch\?v=([\w-]{11})', text):
@@ -2049,10 +2058,9 @@ def parse_history(data):
             if "From Google Ads" in text[m.end():m.end() + 1200].split('class="outer-cell', 1)[0]:
                 continue
             parts = [p for p in (re.sub(r"<[^>]+>", "", x).strip() for x in cell.split("<br>")) if p]
-            entries += 1
             rows.setdefault(m.group(1), parse_when(parts[-1]) if parts else None)
     out = list(rows.items())
-    return [(v, t if t else float(len(out) - i)) for i, (v, t) in enumerate(out)], entries
+    return [(v, t if t else float(len(out) - i)) for i, (v, t) in enumerate(out)]
 
 
 def is_likes(p):
@@ -2080,7 +2088,7 @@ async def takeout_file(request: Request, token: str, name: str):
             kind = "csv"
     elif low.endswith((".json", ".html", ".htm")) and not TAKEOUT_SKIP.search(low.rsplit("/", 1)[-1]):
         try:
-            rows, _ = parse_history(data)
+            rows = parse_history(data)
         except HTTPException:
             rows = []
         for v, ts in rows:
@@ -2091,7 +2099,7 @@ async def takeout_file(request: Request, token: str, name: str):
 
 def takeout_parts(t):
     """The playlists and the liked videos in the CSVs sent."""
-    lists, _ = parse_takeout(t["csv"])
+    lists = parse_takeout(t["csv"])
     likes = list(dict.fromkeys(v for p in lists if is_likes(p) for v in p["vids"]))
     return [p for p in lists if not is_likes(p)], likes
 
@@ -2151,10 +2159,10 @@ def takeout_import(payload: dict = Body(...)):
             out["watched"] = c.execute("select count(*) from watched").fetchone()[0] - before
         if payload.get("likes") and likes:
             now = time.time()
-            n = c.total_changes
+            before = c.execute("select count(*) from ratings").fetchone()[0]  # not total_changes: it counts the sync triggers' rows too
             c.executemany("insert or ignore into ratings(vid, rating, ts, src) values(?,1,?,'takeout')",
                           [(v, now - i) for i, v in enumerate(likes)])
-            out["liked"] = c.total_changes - n
+            out["liked"] = c.execute("select count(*) from ratings").fetchone()[0] - before
         want = set(payload.get("subs") or [])
         subs = [(cid, n) for cid, n in subs_names(list(t["subs"].items())) if cid in want]
         if subs:

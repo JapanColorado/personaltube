@@ -14,6 +14,7 @@ def start(folder, state, downloads=None, native=None):
     (server.NATIVE)."""
     global _started
     if _started:
+        sys.modules["server"].NATIVE = native  # a reopened app is a new Activity; the old one is gone
         return
     os.environ["PT_STATE"] = state
     if downloads:

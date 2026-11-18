@@ -204,7 +204,7 @@ class NativePlayer(private val act: MainActivity) {
     /** The page left the video: keep what was played, then stop. */
     fun stop() {
         if (vid == null) return
-        report()
+        if (dur > 0) report()  // not while still loading: a report without a length would erase the resume position
         close()
     }
 
@@ -231,6 +231,7 @@ class NativePlayer(private val act: MainActivity) {
     /** Picture in picture: the bare picture, no controls. */
     fun pipMode(on: Boolean) {
         if (on) { controls.visibility = View.GONE; skipBtn.visibility = View.GONE; note.visibility = View.GONE }
+        else skipBtn.tag = null  // so the next tick shows the Skip button of a segment that is still playing
         titleView.visibility = if (act.full && !on) View.VISIBLE else View.GONE
     }
 
@@ -257,6 +258,8 @@ class NativePlayer(private val act: MainActivity) {
         spinner.visibility = View.VISIBLE
         Downloads.file(v)?.let { f ->
             height = -1
+            audioOnly = false  // a file is picture and sound in one; "sound only" would just hide its picture
+            audioBtn.setImageResource(R.drawable.pt_audio)
             set(Sources.file(act, f, item()), at)
             return
         }

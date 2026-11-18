@@ -12,6 +12,12 @@
 (?d)__pycache__
 (?d)*.pyc
 /android
+/.github
+/.gitignore
+/scripts
+/fetch_youtube_meta.py
+/README.md
+/CLAUDE.md
 
 // this computer's own state (the phone keeps its own in app storage), its downloaded videos, and stray files
 /downloads

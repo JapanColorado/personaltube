@@ -5,6 +5,7 @@ youtube_meta.jsonl
 __pycache__/
 sync/
 android/.gradle/
+android/.kotlin/
 android/build/
 android/app/build/
 android/local.properties

@@ -160,11 +160,11 @@ function compact(v) {
 }
 const grid = items => items.length ? `<div class="grid">${items.map(card).join('')}</div>` : '<p class="empty">Nothing here yet.</p>';
 
-// Filters, as on hackertube.org: a Filters button, a chip per active filter, and a collapsed panel of options.
+// Filters: a Filters button, a chip per active filter, and a collapsed panel of options.
 // Every option is a link that sets one parameter in the page's own address (clicking the active one clears it),
 // so filters belong to one page, show in its URL and are gone when you leave.
 const filterGroups = () => ({
-  len: ['Duration', [['short', 'Under 20 minutes'], ['medium', '20–60 minutes'], ['long', 'Over 1 hour']], !B.has_meta],
+  len: ['Duration', [['short', 'Under 20 minutes'], ['medium', '20–60 minutes'], ['long', 'Over 1 hour']]],
   type: ['Type', B.types.map(t => [t, t[0].toUpperCase() + t.slice(1)])],
   area: ['Topic', B.areas.map(a => [a.id, a.name])],
   sort: ['Sort by', [['', 'Best first'], ['recent', 'Recently recommended'], ['gems', 'Hidden gems'], ['date', 'Upload date'], ['views', 'View count']]],
@@ -193,7 +193,7 @@ function filterBar(base, keep, f, extra = '', head = '') {
         : `<a href="${link(k, v)}" class="${f[k] === v ? 'on' : ''}">${esc(label)}</a>`).join('')}</div>`).join('')}</div>`;
 }
 
-// "More of this" / "less of this" for a topic area or category (Categories page and topic pages). w is the
+// "More of this" / "less of this" for a topic area or category (Explore page and topic pages). w is the
 // topic's own setting; inh is what a category inherits from its area while it has none of its own.
 const topicCtl = (id, w, inh = 0) => `<span class="tw" data-topic="${id}" data-w="${w}">
     <button class="${w > 0 ? 'on' : inh > 0 ? 'inh' : ''}" data-act="topic" data-w="1" title="More of this on Home and For You" aria-label="More of this" aria-pressed="${w > 0}">${I.add}</button>
@@ -361,7 +361,10 @@ async function pageVideo(vid, autoplay, pl) {
 const descLong = t => t.length > 400 || t.split('\n').length > 6;
 function descHtml(text) {
   return esc(text)
-    .replace(/https?:\/\/[^\s<]*[^\s<.,;:!?)\]]/g, u => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`)
+    .replace(/https?:\/\/(?:(?!&(?:quot|#39|lt|gt);)[^\s<])+/g, m => {   // the text is escaped already: stop at a quote or bracket
+      const u = m.replace(/[.,;:!?)\]]+$/, '');
+      return `<a href="${u}" target="_blank" rel="noopener">${u}</a>${m.slice(u.length)}`;
+    })
     .replace(/(^|[\s(\[])((?:\d{1,2}:)?\d{1,2}:\d{2})(?=$|[\s)\],.])/gm, (m, pre, t) =>
       `${pre}<button class="ts" data-act="seek" data-t="${t.split(':').reduce((a, x) => a * 60 + +x, 0)}">${t}</button>`);
 }
@@ -457,7 +460,7 @@ function ytBackend(vid, start, on) {
     const lang = titleLang((CARDS[vid] || {}).title || '');
     const opt = (name, to) => { try { return to === undefined ? p.getOption('captions', name) : p.setOption('captions', name, to); } catch { return null; } };
     // (settled a moment later: a change of track is reported as off, then on)
-    let settle = null;
+    let settle = null, look = null;
     const seen = t => { cur = t && t.languageCode ? t : null; last = cur || last; clearTimeout(settle); settle = setTimeout(sync, 400); };
     const ccOff = () => { opt('track', {}); try { p.unloadModule('captions'); } catch { /* not loaded */ } };
     // a written track in the video's language if the page was told of one, else that language by name, which
@@ -474,7 +477,8 @@ function ytBackend(vid, start, on) {
       try { p.loadModule('captions'); } catch { return done(false); }
       busy = true;
       let n = 0;
-      const look = setInterval(() => {
+      clearInterval(look);
+      look = setInterval(() => {
         // loaded but showing nothing (they were switched off before): name a track
         if (!cur && ++n === 4) opt('track', lang ? { languageCode: lang } : last || (opt('tracklist') || [])[0] || {});
         if (!cur && n < 24) return;
@@ -527,7 +531,7 @@ function ytBackend(vid, start, on) {
             // speed controller, say) listens, and where YouTube's own keys do the playing. A click elsewhere
             // on the page takes it back.
             focus: () => { const f = p.getIframe(); if (f && document.activeElement !== f) f.focus({ preventScroll: true }); },
-            destroy: () => { clearTimeout(settle); p.destroy(); },
+            destroy: () => { clearTimeout(settle); clearInterval(look); p.destroy(); },
           });
         },
         onApiChange: () => { if (p.getOptions().includes('captions')) seen(opt('track')); },
@@ -603,7 +607,7 @@ async function startPlayer(vid) {
   const send = () => {
     const body = { pos, dur, played };
     played = 0; lastSent = Date.now();
-    return api('/progress/' + vid, body).then(r => { today = r; }).catch(() => { /* next one will carry on */ });
+    return api('/progress/' + vid, body).then(r => { today = r; }).catch(() => { played += body.played; /* the next one carries them */ });
   };
   const check = () => {
     if (!player || player.native) return;   // the phone's player keeps its own account
@@ -626,6 +630,7 @@ async function startPlayer(vid) {
       mark();
       flushProgress = null;
       if (player && player.native) today = nativeToday || today; else { check(); await send(); }
+      if ($('#player') !== box) return;   // the page moved on while that was sent
       stopPlayer();
       stopScreen(vid, today);
     },
@@ -636,6 +641,7 @@ async function startPlayer(vid) {
       delete box.dataset.on;
       if (kind === 'native') { v.noNative = true; toast("This phone's player couldn't open it; trying another way."); return startPlayer(vid); }
       if (kind === 'file') { v.noFile = true; return startPlayer(vid); }
+      if (watch) watch.classList.remove('playing');   // nothing plays: the related list comes back
       box.innerHTML = `<div class="msg"><p>${esc(why)} <a href="https://www.youtube.com/watch?v=${vid}" target="_blank" rel="noopener">Open it on YouTube instead.</a></p></div>`;
     },
   };
@@ -648,8 +654,8 @@ async function startPlayer(vid) {
   if (!box.isConnected || box.dataset.on !== '1') { p.destroy(); return; }   // navigated away meanwhile
   player = p;
   flushProgress = () => { check(); if (dur) send(); };
+  if (p.native) return;   // the phone's player keeps its own account
   progTimer = setInterval(check, 5000);
-  if (p.native) return;
   const ctl = pctl = playerControls(box, p);
   sponsorWatch(vid, p, ctl);
 }
@@ -658,7 +664,8 @@ addEventListener('pagehide', () => { if (flushProgress) flushProgress(); dlFlush
 
 // The web players' own controls. YouTube's are turned off, so its title overlay and "More videos" shelf never
 // show, and SponsorBlock segments can be drawn on the seek bar. A transparent shield over the video takes the
-// clicks (click: play or pause, double click: fullscreen), which also keeps the keyboard with the page. The bar
+// clicks (click: play or pause, double click: fullscreen); while a YouTube video plays, each click then hands the
+// keyboard to its frame (the backend's `focus`). The bar
 // hides while the video plays and the mouse is still. Returns what the keyboard and SponsorBlock need.
 const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 const clock = s => fmtDur(Math.floor(s)) || '0:00';
@@ -743,7 +750,7 @@ function playerControls(box, p) {
     if (!menu.hidden) return closeMenu();
     if (touch && box.classList.contains('idle')) return wake();
     clearTimeout(clickT);
-    if (e.detail < 2) clickT = setTimeout(toggle, 220);
+    if (e.detail < 2) clickT = setTimeout(() => { if (player === p) toggle(); }, 220);
   });
   shield.addEventListener('dblclick', () => { clearTimeout(clickT); fs(); });
   box.addEventListener('mousemove', () => wake(), sig);
@@ -841,7 +848,7 @@ async function sponsorWatch(vid, p, ctl) {
     if (g && g.act === 'skip' && !g.done) {
       g.done = true;
       p.seek(g.e);
-      return toast(`Skipped: ${g.name}`, () => p.seek(g.s));
+      return toast(`Skipped: ${g.name}`, () => { if (player === p) p.seek(g.s); });
     }
     const want = g && g.act === 'ask' ? g : null;
     if (ask && (ask.dataset.s || '') !== String(want ? want.s : '')) {
@@ -896,6 +903,7 @@ function dlWatch() {
   }, 2000);
 }
 async function dlStart(vid) {
+  if (DLDEL.has(vid)) { clearTimeout(DLDEL.get(vid)); DLDEL.delete(vid); }   // a removal still in its Undo window is off
   const r = await api('/download/' + vid, {});
   if (r.state === 'done') { CARDS[vid].dl = true; } else { DLJOBS[vid] = { state: r.state, frac: 0 }; dlWatch(); }
   dlPaint();
@@ -972,6 +980,7 @@ async function pageFollowing(tab) {
   const d = await api('/following');
   const chans = tab === 'channels';
   const total = d.channels.length;
+  if (total <= 12) chanFilter = '';   // the filter box is not drawn then
   let h = `<div class="pagehead"><h2>Following</h2></div>
     <div class="tabs"><a href="#/following" class="${chans ? '' : 'on'}">Videos</a><a href="#/following/channels" class="${chans ? 'on' : ''}">Channels <span class="muted">${total}</span></a>
       <span class="grow"></span>${chans || !B.has_key ? '' : `<button class="pill" data-act="refresh">${I.refresh} Check for new uploads</button>`}</div>`;
@@ -987,7 +996,7 @@ async function pageFollowing(tab) {
         <div class="chlist" id="chanlist">${list.map(c => `<div class="ch" data-name="${esc(c.name.toLowerCase())}">
           <a class="name" href="#/channel/${enc(c.name)}"><b>${esc(c.name)}</b>
             <span class="sub">${c.hn ? `${c.hn} in the library, ${c.unwatched} unwatched` : (c.checked ? 'Uploads only' : 'Not checked yet')}</span></a>
-          ${c.new ? `<span class="new">${c.new} new</span>` : ''}
+          ${c.new && !B.settings.calm ? `<span class="new">${c.new} new</span>` : ''}
           ${quietBtn(c.name, c.quiet)}
           <button class="unf" data-follow="${esc(c.name)}" data-on="1" title="Unfollow ${esc(c.name)}" aria-label="Unfollow ${esc(c.name)}">${I.close}</button></div>`).join('')}</div>
         <p class="empty" id="channone" hidden>No followed channel matches that.</p>`;
@@ -1259,11 +1268,11 @@ async function route() {
   const [path, qs = ''] = location.hash.replace(/^#\/?/, '').split('?');
   const p = Object.fromEntries(new URLSearchParams(qs));
   const [name, ...rest] = path.split('/');
-  const arg = decodeURIComponent(rest.join('/'));
   const tab = { '': 'mix', foryou: 'foryou', explore: 'explore', categories: 'explore', browse: 'explore', a: 'explore', c: 'explore', channel: 'following', following: 'following', playlists: 'playlists', playlist: 'playlists', library: 'library', history: 'library', liked: 'library', review: 'review', setup: 'setup' }[name];
   document.querySelectorAll('#side .nav a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
   $('#search input').value = name === 'browse' ? (p.q || '') : '';
   try {
+    const arg = decodeURIComponent(rest.join('/'));
     if (name === '') await pageMix(p);
     else if (name === 'browse') await pageBrowse(p);
     else if (name === 'channel') await pageBrowse(p, { channel: arg });
@@ -1418,11 +1427,11 @@ document.addEventListener('click', async e => {
       const on = t.dataset.on !== '1';
       await api('/follow', { channel: t.dataset.follow, follow: on });
       toast(on ? `Following ${t.dataset.follow}` : `Unfollowed ${t.dataset.follow}`);
-      if (!location.hash.startsWith('#/v/')) return refresh();
+      if (!location.hash.startsWith('#/v/')) return await refresh();
       t.dataset.on = on ? 1 : 0;           // keep the player running: update in place
       t.textContent = on ? 'Following' : 'Follow';
       t.classList.toggle('solid', !on);
-      return reboot();
+      return await reboot();
     }
     if (t.dataset.addto !== undefined) {
       const on = !t.classList.contains('in'), pid = +t.dataset.addto, pv = pop.dataset.pv, at = popAnchor, ph = popHost;
@@ -1477,7 +1486,7 @@ document.addEventListener('click', async e => {
       }
       case 'jumpnext': { const li = $('#main .plrows .nextup'); if (li) li.scrollIntoView({ block: 'center' }); return; }
       case 'closekeys': $('#keys').close(); return;
-      case 'takeoutgo': return takeoutImport(t);
+      case 'takeoutgo': return await takeoutImport(t);
       case 'takeoutcancel': $('#takeoutres').innerHTML = ''; return;
       case 'forgetimport':
         if (t.dataset.sure) {
@@ -1491,7 +1500,7 @@ document.addEventListener('click', async e => {
         e.stopPropagation();
         if (!pop.hidden && popAnchor === t) return closePopup();
         return menuPopup(vid, t, host);
-      case 'watch': location.hash = vhref({ vid, pl: host && host.dataset.pl }, true); return;
+      case 'watch': location.hash = vhref({ ...(CARDS[vid] || { vid }), ...(host && host.dataset.pl ? { pl: host.dataset.pl } : {}) }, true); return;
       case 'play': e.preventDefault(); return startPlayer(vid);
       case 'intent': {
         api('/intent', { intent: t.dataset.kind }).catch(() => { /* only a count for the Review page */ });
@@ -1500,11 +1509,11 @@ document.addEventListener('click', async e => {
         return startPlayer(vid);
       }
       case 'sbskip': if (player) player.seek(+t.dataset.t); t.remove(); return;
-      case 'dl': return dlStart(vid);
-      case 'dlstop': return dlRemove(vid, true);
-      case 'dlrm': return dlRemove(vid, false);
+      case 'dl': return await dlStart(vid);
+      case 'dlstop': return await dlRemove(vid, true);
+      case 'dlrm': return await dlRemove(vid, false);
       case 'showrel': t.remove(); $('.watch').classList.remove('playing'); return;
-      case 'seen': return setWatched(vid, !(CARDS[vid] && CARDS[vid].watched));
+      case 'seen': return await setWatched(vid, !(CARDS[vid] && CARDS[vid].watched));
       case 'list': e.stopPropagation(); return listPopup(vid, anchor, host);
       case 'like': case 'dislike': case 'unrate': {
         const want = { like: 1, dislike: -1, unrate: 0 }[t.dataset.act];
@@ -1535,7 +1544,7 @@ document.addEventListener('click', async e => {
         t.disabled = true; t.textContent = 'Checking…';
         const r = await api('/refresh_uploads', {});
         toast(`${r.added} new upload${r.added === 1 ? '' : 's'} found` + (r.errors.length ? `; ${r.errors.length} problem(s): ${r.errors[0]}` : ''));
-        return refresh();
+        return await refresh();
       }
       case 'plall': case 'plnone':
         document.querySelectorAll('#plresults .plpick:not(:disabled)').forEach(b => { b.checked = t.dataset.act === 'plall'; });
@@ -1558,7 +1567,7 @@ document.addEventListener('click', async e => {
         t.disabled = true; t.textContent = 'Syncing…';
         const r = await api(`/playlists/${t.dataset.id}/sync`, {});
         toast(syncMsg(r));
-        return refresh();
+        return await refresh();
       }
       case 'up': case 'down':
         await api(`/playlists/${host.dataset.pl}/move`, { vid, dir: e.shiftKey ? (t.dataset.act === 'up' ? 'top' : 'bottom') : t.dataset.act });
@@ -1572,7 +1581,7 @@ document.addEventListener('click', async e => {
           await api(`/playlists/${pl}/move`, { vid, before });
           await refresh();
         });
-        return refresh();
+        return await refresh();
       }
       case 'delpl':
         if (t.dataset.sure) { await api('/playlists/' + t.dataset.id, undefined, 'DELETE'); await reboot(); location.hash = '#/playlists'; }
@@ -1723,7 +1732,10 @@ document.addEventListener('keydown', e => {
   if (k === 'g') { goAt = Date.now(); return; }
   const onVideo = routeName() === 'v', host = el.closest('#main [data-vid]') || (onVideo && $('#main .primary[data-vid]'));
   if (onVideo && (el === document.body || el.closest('#player'))) {   // the player, while nothing else has the focus
-    if (k === ' ' && !player) { e.preventDefault(); return host && startPlayer(host.dataset.vid); }
+    if (k === ' ' && !player) {
+      if (el.closest('button, input, a:not(.poster)')) return;   // a focused button of the end screen or the question: Space presses it
+      e.preventDefault(); return host && startPlayer(host.dataset.vid);
+    }
     if (player && playerKey(k)) { e.preventDefault(); return; }
   }
   if (k === 'j' || k === 'k') {
