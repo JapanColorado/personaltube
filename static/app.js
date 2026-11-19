@@ -249,9 +249,9 @@ async function pageMix(p) {
       </div>${kebab}</div></div>`;
   }
   const body = lead + (d.items.length ? grid(d.items) : '');
-  main(filterBar('#/', {}, f, `<span class="muted">${esc(tallyText(d.today))}</span>`, '<h2>Home</h2>')
-    + (body ? body + `<div class="endnote"><p>That is everything for today.</p>
-        <button class="chip" data-act="reshuffle" title="Deal different suggestions for today">${I.refresh} Different suggestions</button></div>`
+  main(filterBar('#/', {}, f, `<span class="muted">${esc(tallyText(d.today))}</span>
+      <button class="pill" data-act="reshuffle" title="Deal different suggestions for today">${I.refresh} Different suggestions</button>`, '<h2>Home</h2>')
+    + (body ? body + '<div class="endnote"><p>That is everything for today.</p></div>'
       : '<p class="empty">Nothing matches these filters. Try removing one.</p>'));
 }
 
@@ -1046,6 +1046,7 @@ async function pagePlaylist(id) {
     ${p.next && p.items.length > 12 ? `<button class="pill" data-act="jumpnext">${I.down} Up next</button>` : ''}
     ${p.yt_id ? `${B.has_key ? `<button class="pill" data-act="plsync" data-id="${p.id}" title="Add what is new on YouTube, drop what was removed there; your own changes here are kept">${I.refresh} Sync with YouTube</button>` : ''}
       <a class="pill" href="https://www.youtube.com/playlist?list=${esc(p.yt_id)}" target="_blank" rel="noopener">${I.out} On YouTube</a>` : ''}
+    <button class="pill" data-act="plquiet" data-id="${p.id}" data-q="${p.quiet ? 1 : 0}" data-name="${esc(p.name)}" title="${p.quiet ? 'Kept off the home page. Click to let it back.' : 'Its next video is shown on the home page. Click to keep it off.'}">${I.home} ${p.quiet ? 'Off Home' : 'On Home'}</button>
     <button class="pill danger" data-act="delpl" data-id="${p.id}">${I.trash} Delete playlist</button></div>`;
   if (p.pending) h += `<p class="note">${p.pending} video${p.pending === 1 ? ' is' : 's are'} not shown: imported without a YouTube API key, so there are no titles for them yet. ${B.has_key
     ? `<button class="pill" data-act="plsync" data-id="${p.id}">${I.refresh} Fetch details</button>` : 'See <a href="#/setup">Settings</a>.'}</p>`;
@@ -1401,6 +1402,7 @@ function openPopup(html, vid, anchor, host) {
 }
 function menuPopup(vid, anchor, host) {
   const on = !!(CARDS[vid] && CARDS[vid].watched), r = (CARDS[vid] && CARDS[vid].rating) || 0;
+  const why = CARDS[vid] && CARDS[vid].reason, nextIn = why && why.kind === 'next' ? why : null;   // a playlist's card on Home
   openPopup(`<button class="mi" data-act="watch">${I.play}<span>Play now</span></button>
     <button class="mi" data-act="like">${I.like}<span>${r > 0 ? 'Remove like' : 'Like: more like this'}</span></button>
     <button class="mi" data-act="dislike">${I.dislike}<span>${r < 0 ? 'Remove dislike' : 'Dislike: fewer like this'}</span></button>
@@ -1409,6 +1411,7 @@ function menuPopup(vid, anchor, host) {
     <button class="mi" data-act="list">${I.save}<span>Save to playlist</span></button>
     ${CARDS[vid] && CARDS[vid].dl ? `<button class="mi" data-act="dlrm">${I.dl}<span>Remove the download</span></button>`
       : DLJOBS[vid] && DLJOBS[vid].state !== 'error' ? '' : `<button class="mi" data-act="dl">${I.dl}<span>Download</span></button>`}
+    ${nextIn ? `<button class="mi" data-act="plquiet" data-id="${nextIn.playlist}" data-q="0" data-name="${esc(nextIn.text.replace(/^Next in: /, ''))}">${I.home}<span>Keep this playlist off Home</span></button>` : ''}
     <button class="mi" data-act="hide">${I.hide}<span>Hide forever</span></button>`, vid, anchor, host);
 }
 // The picker ticks the playlists that already hold the video; clicking one adds or removes it and the picker stays.
@@ -1492,6 +1495,13 @@ document.addEventListener('click', async e => {
         const quiet = t.dataset.q !== '1';
         await api('/follow/quiet', { channel: t.dataset.ch, quiet });
         toast(quiet ? `${t.dataset.ch} stays off the home page. Still on Following.` : `${t.dataset.ch} is back on the home page.`);
+        return route();
+      }
+      case 'plquiet': {
+        const id = t.dataset.id, name = t.dataset.name, quiet = t.dataset.q !== '1';
+        await api(`/playlists/${id}/quiet`, { quiet });
+        toast(quiet ? `${name} stays off the home page.` : `${name} is back on the home page.`,
+          quiet ? async () => { await api(`/playlists/${id}/quiet`, { quiet: false }); await route(); } : undefined);
         return route();
       }
       case 'seek': {

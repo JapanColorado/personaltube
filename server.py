@@ -257,6 +257,8 @@ with db() as _c:
         _c.execute("alter table playlists add column yt_seen text")
     if "quiet" not in {r[1] for r in _c.execute("pragma table_info(follows)")}:
         _c.execute("alter table follows add column quiet integer default 0")  # 1: followed, but kept off the home page
+    if "quiet" not in {r[1] for r in _c.execute("pragma table_info(playlists)")}:
+        _c.execute("alter table playlists add column quiet integer default 0")  # 1: its next video stays off the home page
     for _t in ("watched", "ratings"):  # src='takeout' marks rows that came from a Takeout import, so it can be undone
         if "src" not in {r[1] for r in _c.execute(f"pragma table_info({_t})")}:
             _c.execute(f"alter table {_t} add column src text")
@@ -675,9 +677,12 @@ def build_mix(c, area="", cat="", length="", types=None):
             if v not in st.watched and v not in st.hidden and st.available(v) and passes(v, st, **flt)][:HOME_CONTINUE]
     used = set(cont)
 
-    # 1. Queue, part one: the next unwatched video of saved playlists, a different few each day.
+    # 1. Queue, part one: the next unwatched video of saved playlists, a different few each day
+    # (not of playlists the user keeps off the home page).
     nexts = []
     for p in playlist_rows(c):
+        if p["quiet"]:
+            continue
         nxt = next((v for v in p["vids"] if v not in done and st.available(v)), None)
         if nxt and nxt not in used and nxt not in reasons and passes(nxt, st, **flt):
             reasons[nxt] = {"kind": "next", "text": f"Next in: {p['name']}", "playlist": p["id"]}
@@ -1747,6 +1752,7 @@ def playlist_detail(c, pid, st=None):
     vids = [v for v in vids if st.available(v)]
     nxt = next((v for v in vids if v not in st.watched), None)
     return {"id": p["id"], "name": p["name"], "yt_id": p["yt_id"], "next": nxt, "pending": pending,
+            "quiet": bool(p["quiet"]),
             "done": sum(v in st.watched for v in vids), "items": [card(v, st) for v in vids]}
 
 
@@ -1960,6 +1966,14 @@ def playlist_get(pid: int):
     load_meta()
     with db() as c:
         return playlist_detail(c, pid)
+
+
+@app.post("/api/playlists/{pid}/quiet")
+def playlist_quiet(pid: int, payload: dict = Body(...)):
+    """Keep a playlist's next video off the home page (the playlist itself is untouched), or let it back."""
+    with db() as c:
+        c.execute("update playlists set quiet=? where id=?", (1 if payload.get("quiet", True) else 0, pid))
+    return {"ok": True}
 
 
 @app.delete("/api/playlists/{pid}")
