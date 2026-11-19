@@ -259,6 +259,8 @@ with db() as _c:
         _c.execute("alter table follows add column quiet integer default 0")  # 1: followed, but kept off the home page
     if "quiet" not in {r[1] for r in _c.execute("pragma table_info(playlists)")}:
         _c.execute("alter table playlists add column quiet integer default 0")  # 1: its next video stays off the home page
+    if "pin" not in {r[1] for r in _c.execute("pragma table_info(playlists)")}:
+        _c.execute("alter table playlists add column pin integer default 0")  # 1: its next video is on the home page every day
     for _t in ("watched", "ratings"):  # src='takeout' marks rows that came from a Takeout import, so it can be undone
         if "src" not in {r[1] for r in _c.execute(f"pragma table_info({_t})")}:
             _c.execute(f"alter table {_t} add column src text")
@@ -685,10 +687,12 @@ def build_mix(c, area="", cat="", length="", types=None):
             continue
         nxt = next((v for v in p["vids"] if v not in done and st.available(v)), None)
         if nxt and nxt not in used and nxt not in reasons and passes(nxt, st, **flt):
-            reasons[nxt] = {"kind": "next", "text": f"Next in: {p['name']}", "playlist": p["id"]}
+            reasons[nxt] = {"kind": "next", "text": f"Next in: {p['name']}", "playlist": p["id"], "pin": bool(p["pin"])}
             nexts.append(nxt)
-    # "Watch later" is the queue filled one click at a time, so its next video is always among them
-    nexts = sorted(nexts, key=lambda v: (reasons[v]["playlist"] != st.later_id, rnd(seed + "pl", v)))[:HOME_PLAYLISTS]
+    # Pinned playlists are all there, every day; the others fill what is left of the few places. "Watch later"
+    # is the queue filled one click at a time, so its next video is always among them
+    nexts = sorted(nexts, key=lambda v: (not reasons[v]["pin"], reasons[v]["playlist"] != st.later_id, rnd(seed + "pl", v)))
+    nexts = nexts[:max(HOME_PLAYLISTS, sum(reasons[v]["pin"] for v in nexts))]
 
     # 2. Queue, part two: uploads from followed channels, recent ones first, one per channel.
     # (not from channels the user keeps off the home page, and not longer than the limit set in Settings)
@@ -1752,7 +1756,7 @@ def playlist_detail(c, pid, st=None):
     vids = [v for v in vids if st.available(v)]
     nxt = next((v for v in vids if v not in st.watched), None)
     return {"id": p["id"], "name": p["name"], "yt_id": p["yt_id"], "next": nxt, "pending": pending,
-            "quiet": bool(p["quiet"]),
+            "quiet": bool(p["quiet"]), "pin": bool(p["pin"]),
             "done": sum(v in st.watched for v in vids), "items": [card(v, st) for v in vids]}
 
 
@@ -1971,8 +1975,22 @@ def playlist_get(pid: int):
 @app.post("/api/playlists/{pid}/quiet")
 def playlist_quiet(pid: int, payload: dict = Body(...)):
     """Keep a playlist's next video off the home page (the playlist itself is untouched), or let it back."""
+    quiet = 1 if payload.get("quiet", True) else 0
     with db() as c:
-        c.execute("update playlists set quiet=? where id=?", (1 if payload.get("quiet", True) else 0, pid))
+        c.execute("update playlists set quiet=? where id=?", (quiet, pid))
+        if quiet:   # off Home and pinned to it cannot both hold
+            c.execute("update playlists set pin=0 where id=? and pin=1", (pid,))
+    return {"ok": True}
+
+
+@app.post("/api/playlists/{pid}/pin")
+def playlist_pin(pid: int, payload: dict = Body(...)):
+    """Pin a playlist to the home page (its next video is there every day, not just some days), or unpin it."""
+    pin = 1 if payload.get("pin", True) else 0
+    with db() as c:
+        c.execute("update playlists set pin=? where id=?", (pin, pid))
+        if pin:
+            c.execute("update playlists set quiet=0 where id=? and quiet=1", (pid,))
     return {"ok": True}
 
 

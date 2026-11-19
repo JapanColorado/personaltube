@@ -31,6 +31,7 @@ const I = {
   like: svg('M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z'),
   clock: svg('M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z'),
   minus: svg('M19 13H5v-2h14v2z'),
+  pin: svg('M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z'),
   home: svg('M4 21V10.08l8-6.96 8 6.96V21h-6v-6h-4v6H4z'),
   grip: svg('M11 18c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm-2-8c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0-6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z'),
   dl: svg('M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z'),
@@ -1046,6 +1047,7 @@ async function pagePlaylist(id) {
     ${p.next && p.items.length > 12 ? `<button class="pill" data-act="jumpnext">${I.down} Up next</button>` : ''}
     ${p.yt_id ? `${B.has_key ? `<button class="pill" data-act="plsync" data-id="${p.id}" title="Add what is new on YouTube, drop what was removed there; your own changes here are kept">${I.refresh} Sync with YouTube</button>` : ''}
       <a class="pill" href="https://www.youtube.com/playlist?list=${esc(p.yt_id)}" target="_blank" rel="noopener">${I.out} On YouTube</a>` : ''}
+    <button class="pill ${p.pin ? 'on' : ''}" data-act="plpin" data-id="${p.id}" data-q="${p.pin ? 1 : 0}" data-name="${esc(p.name)}" title="${p.pin ? 'Its next video is on the home page every day. Click to unpin.' : 'Show its next video on the home page every day'}">${I.pin} ${p.pin ? 'Pinned to Home' : 'Pin to Home'}</button>
     <button class="pill" data-act="plquiet" data-id="${p.id}" data-q="${p.quiet ? 1 : 0}" data-name="${esc(p.name)}" title="${p.quiet ? 'Kept off the home page. Click to let it back.' : 'Its next video is shown on the home page. Click to keep it off.'}">${I.home} ${p.quiet ? 'Off Home' : 'On Home'}</button>
     <button class="pill danger" data-act="delpl" data-id="${p.id}">${I.trash} Delete playlist</button></div>`;
   if (p.pending) h += `<p class="note">${p.pending} video${p.pending === 1 ? ' is' : 's are'} not shown: imported without a YouTube API key, so there are no titles for them yet. ${B.has_key
@@ -1404,15 +1406,16 @@ function menuPopup(vid, anchor, host) {
   const on = !!(CARDS[vid] && CARDS[vid].watched), r = (CARDS[vid] && CARDS[vid].rating) || 0;
   const why = CARDS[vid] && CARDS[vid].reason, nextIn = why && why.kind === 'next' ? why : null;   // a playlist's card on Home
   openPopup(`<button class="mi" data-act="watch">${I.play}<span>Play now</span></button>
-    <button class="mi" data-act="like">${I.like}<span>${r > 0 ? 'Remove like' : 'Like: more like this'}</span></button>
-    <button class="mi" data-act="dislike">${I.dislike}<span>${r < 0 ? 'Remove dislike' : 'Dislike: fewer like this'}</span></button>
+    <button class="mi" data-act="like">${I.like}<span>${r > 0 ? 'Remove like' : 'More like this'}</span></button>
+    <button class="mi" data-act="dislike">${I.dislike}<span>${r < 0 ? 'Remove dislike' : 'Fewer like this'}</span></button>
     <button class="mi" data-act="seen">${I.check}<span>${seenTitle(on)}</span></button>
     <button class="mi" data-act="later">${I.clock}<span>${laterTitle(!!(CARDS[vid] && CARDS[vid].later))}</span></button>
     <button class="mi" data-act="list">${I.save}<span>Save to playlist</span></button>
     ${CARDS[vid] && CARDS[vid].dl ? `<button class="mi" data-act="dlrm">${I.dl}<span>Remove the download</span></button>`
       : DLJOBS[vid] && DLJOBS[vid].state !== 'error' ? '' : `<button class="mi" data-act="dl">${I.dl}<span>Download</span></button>`}
-    ${nextIn ? `<button class="mi" data-act="plquiet" data-id="${nextIn.playlist}" data-q="0" data-name="${esc(nextIn.text.replace(/^Next in: /, ''))}">${I.home}<span>Keep this playlist off Home</span></button>` : ''}
-    <button class="mi" data-act="hide">${I.hide}<span>Hide forever</span></button>`, vid, anchor, host);
+    ${nextIn ? `<button class="mi" data-act="plpin" data-id="${nextIn.playlist}" data-q="${nextIn.pin ? 1 : 0}" data-name="${esc(nextIn.text.replace(/^Next in: /, ''))}">${I.pin}<span>${nextIn.pin ? 'Unpin this playlist from Home' : 'Pin this playlist to Home'}</span></button>
+      <button class="mi" data-act="plquiet" data-id="${nextIn.playlist}" data-q="0" data-name="${esc(nextIn.text.replace(/^Next in: /, ''))}">${I.home}<span>Keep this playlist off Home</span></button>` : ''}
+    <button class="mi" data-act="hide">${I.hide}<span>Hide video forever</span></button>`, vid, anchor, host);
 }
 // The picker ticks the playlists that already hold the video; clicking one adds or removes it and the picker stays.
 async function listPopup(vid, anchor, host) {
@@ -1495,6 +1498,12 @@ document.addEventListener('click', async e => {
         const quiet = t.dataset.q !== '1';
         await api('/follow/quiet', { channel: t.dataset.ch, quiet });
         toast(quiet ? `${t.dataset.ch} stays off the home page. Still on Following.` : `${t.dataset.ch} is back on the home page.`);
+        return route();
+      }
+      case 'plpin': {
+        const pin = t.dataset.q !== '1';
+        await api(`/playlists/${t.dataset.id}/pin`, { pin });
+        toast(pin ? `${t.dataset.name} is pinned to the home page.` : `${t.dataset.name} is no longer pinned.`);
         return route();
       }
       case 'plquiet': {
