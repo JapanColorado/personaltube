@@ -8,6 +8,10 @@ pixi run start   # http://127.0.0.1:8765
 
 The Android app is released as a signed APK on this repository's releases page (tags `android-v*`). It reads the server code and the library from a folder that Syncthing keeps on the phone.
 
+## How this was built
+
+Built with [Claude Code](https://claude.com/claude-code), and most commits say so. I decide what to make, write the specification, review the changes and use the result every day.
+
 ## Data and credits
 
 The video library (`videos.jsonl`, `mentions.jsonl`, `related.jsonl`, `taxonomy.json`, `embeddings.npy`, `embedding_ids.json`) is the data export of [HackerTube](https://hackertube.org), built from the [open-index/hacker-news](https://huggingface.co/datasets/open-index/hacker-news) dataset. It is released under the [Open Data Commons Attribution License (ODC-By) v1.0](https://opendatacommons.org/licenses/by/1-0/). Hacker News data is provided by Y Combinator, and the comments remain the work of their authors. Video titles and channel names belong to their creators.
@@ -15,3 +19,7 @@ The video library (`videos.jsonl`, `mentions.jsonl`, `related.jsonl`, `taxonomy.
 When the app runs, it looks up crowd-sourced titles and thumbnails from [DeArrow](https://dearrow.ajay.app) and segments from [SponsorBlock](https://sponsor.ajay.app). Both are CC BY-NC-SA 4.0, and none of their data is stored in this repository. YouTube API data is never committed.
 
 Not affiliated with YouTube, Google, Hacker News or Y Combinator.
+
+## License
+
+The code is [MIT](LICENSE). The bundled library data keeps its own licence, described above.
