@@ -51,8 +51,9 @@ if __name__ == "__main__":
 # Content types in the daily mix by default (interviews, podcasts and news are filter-only).
 DEFAULT_TYPES = {"talk", "lecture", "course", "tutorial", "explainer", "documentary",
                  "demo", "comedy", "music", "commentary", "other"}
-HOME_CONTINUE, HOME_PLAYLISTS, HOME_UPLOADS = 3, 3, 3   # home page: started videos, then "your queue"
+HOME_CONTINUE, HOME_PLAYLISTS, HOME_UPLOADS = 2, 3, 3   # home page, at most: started videos, then "your queue"
 HOME_PICKS, HOME_BRANCH = 7, 3                          # then suggestions near your taste, and a few far from it
+CONTINUE_HALF_LIFE = 3    # days: a video started this long ago is on Home every other day, and fades from there
 BRANCH_MAX_AFFINITY = 0.05  # "branch out" only offers videos the taste model does not already lean towards
 MIN_UPLOAD_SECONDS = 180  # skip Shorts / tiny clips from followed channels
 NEW_DAYS = 14             # uploads this recent get the NEW! badge
@@ -484,47 +485,114 @@ def yt_playlist_vids(yt_id, cap=500):
 
 
 _refresh_lock = threading.Lock()
+FEED_NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
+           "m": "http://search.yahoo.com/mrss/"}
+
+
+def feed_uploads(cid):
+    """A channel's latest uploads from YouTube's public feed, which needs no API key (so the phone can refresh
+    too): [{vid, title, pub, views}], newest first, at most 15. The feed of the channel's "videos" playlist
+    (UULF) leaves out Shorts and live streams; when YouTube does not serve it, the channel's whole feed is read
+    and the entries that link to /shorts/ are dropped. The feed has no durations."""
+    import xml.etree.ElementTree as ET
+    last = None
+    for q in (f"playlist_id=UULF{cid[2:]}", f"channel_id={cid}"):
+        req = urllib.request.Request(f"https://www.youtube.com/feeds/videos.xml?{q}",
+                                     headers={"User-Agent": "Mozilla/5.0 (PersonalTube)"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                root = ET.fromstring(r.read())
+        except urllib.error.HTTPError as e:
+            last = f"YouTube's feed answered {e.code}"
+            continue
+        except (OSError, ET.ParseError):
+            last = "Could not reach YouTube (network problem?)"
+            break
+        out = []
+        for en in root.findall("a:entry", FEED_NS):
+            vid = en.findtext("yt:videoId", "", FEED_NS)
+            link = en.find("a:link", FEED_NS)
+            if not re.fullmatch(r"[\w-]{11}", vid) or (link is not None and "/shorts/" in link.get("href", "")):
+                continue
+            stats = en.find("m:group/m:community/m:statistics", FEED_NS)
+            out.append({"vid": vid, "title": en.findtext("a:title", "", FEED_NS),
+                        "pub": en.findtext("a:published", "", FEED_NS)[:10],
+                        "views": to_int(stats.get("views")) if stats is not None else None})
+        return out
+    raise HTTPException(502, last)
+
+
+def channel_id_for(name, cid):
+    """The YouTube channel id of a followed channel: stored, from the library's metadata, or (with the API key)
+    from the details of one of its videos."""
+    cid = cid or CHAN_ID.get(name)
+    if not cid and BY_CHANNEL.get(name) and os.environ.get("YOUTUBE_API_KEY"):
+        info = fetch_video_info(BY_CHANNEL[name][:5])
+        cid = next((i["cid"] for i in info.values()), None)
+    return cid
 
 
 def refresh_uploads():
-    """Pull recent uploads for every followed channel. ~2 quota units per channel."""
+    """Pull recent uploads for every followed channel. The list of uploads comes from YouTube's public feeds, which
+    need no key; with the API key, new videos are then described by videos.list (1 quota unit per 50 videos), which
+    gives their length, and uploads another device found without a key get theirs filled in. Without the key an
+    upload has no length until it is played or a device with the key sees it."""
     added, errors = 0, []
+    key = bool(os.environ.get("YOUTUBE_API_KEY"))
     with _refresh_lock:
         with db() as c:
             follows = [tuple(r) for r in c.execute("select channel, channel_id from follows")]
             known = {r[0] for r in c.execute("select vid from extra where upload=1")}
-        for name, cid in follows:
+
+        def one(f):
+            name, cid = f
             try:
+                cid = channel_id_for(name, cid)
                 if not cid:
-                    cid = CHAN_ID.get(name)
-                    if not cid and BY_CHANNEL.get(name):
-                        info = fetch_video_info(BY_CHANNEL[name][:5])
-                        cid = next((i["cid"] for i in info.values()), None)
-                    if not cid:
-                        errors.append(f"{name}: could not find its YouTube channel id")
-                        continue
-                r = yt("playlistItems", part="contentDetails", playlistId="UU" + cid[2:], maxResults=15)
-                ids = [i["contentDetails"]["videoId"] for i in r.get("items", [])]
-                new = [v for v in ids if v not in V and v not in known]
-                info = fetch_video_info(new) if new else {}
-                with db() as c:
-                    c.execute("update follows set channel_id=?, checked_ts=? where channel=?", (cid, time.time(), name))
-                    for vid, i in info.items():
-                        if i["dur"] >= MIN_UPLOAD_SECONDS and not i["live"]:
-                            add_extra(c, vid, i, upload=1, channel=name)
-                            added += 1
+                    return name, None, None, "could not find its YouTube channel id"
+                return name, cid, feed_uploads(cid), None
             except HTTPException as e:
-                errors.append(f"{name}: {e.detail}")
-                if "quota" in str(e.detail).lower() or e.status_code == 400:
-                    break
+                return name, cid, None, e.detail
+        with ThreadPoolExecutor(8) as ex:
+            got = list(ex.map(one, follows))
+        fresh = {}  # vid -> (channel name, what the feed says)
+        for name, cid, entries, err in got:
+            if err:
+                errors.append(f"{name}: {err}")
+                continue
+            with db() as c:
+                c.execute("update follows set channel_id=?, checked_ts=? where channel=?", (cid, time.time(), name))
+            for e in entries:
+                if e["vid"] not in V and e["vid"] not in known:
+                    fresh.setdefault(e["vid"], (name, dict(e, cid=cid)))
+        info, short, described = {}, set(), False
+        if key:
+            try:
+                with db() as c:  # uploads stored without a length, by this device or another one without the key
+                    nodur = [r[0] for r in c.execute("select vid from extra where upload=1 and dur is null")]
+                info = fetch_video_info(list(fresh) + nodur)
+                described = True
+                short = {v for v, i in info.items() if i["dur"] < MIN_UPLOAD_SECONDS or i["live"]}
+                with db() as c:
+                    for v in nodur:
+                        if v in info:
+                            c.execute("update extra set dur=?, upload=? where vid=?",
+                                      (info[v]["dur"], 0 if v in short else 1, v))
+            except HTTPException as e:
+                errors.append(f"video details: {e.detail}")
         with db() as c:
+            for vid, (name, e) in fresh.items():
+                if vid in short or (described and vid not in info):  # too short, live, or not public
+                    continue
+                i = info.get(vid) or {"title": e["title"], "channel": name, "cid": e["cid"], "dur": None,
+                                      "pub": e["pub"], "views": e["views"]}
+                add_extra(c, vid, i, upload=1, channel=name)
+                added += 1
             kv_set(c, "last_refresh", time.time())
     return {"added": added, "errors": errors}
 
 
 def maybe_refresh_in_background():
-    if not os.environ.get("YOUTUBE_API_KEY"):
-        return
     with db() as c:
         if not c.execute("select 1 from follows limit 1").fetchone():
             return
@@ -674,9 +742,14 @@ def build_mix(c, area="", cat="", length="", types=None):
     flt = dict(area=area, cat=cat, length=length)
     reasons = {}
 
-    # 0. Continue: started and not finished, most recent first.
+    # 0. Continue: started and not finished, most recent first. One played in the last day is always offered; an
+    #    older one only on some days, ever fewer as it ages, so a video left unfinished on purpose fades from Home
+    #    (all of them stay at the top of History).
+    now = time.time()
     cont = [v for v, p in sorted(st.progress.items(), key=lambda x: -x[1]["ts"])
-            if v not in st.watched and v not in st.hidden and st.available(v) and passes(v, st, **flt)][:HOME_CONTINUE]
+            if v not in st.watched and v not in st.hidden and st.available(v) and passes(v, st, **flt)
+            and rnd(seed + "co", v) < 0.5 ** (max(0.0, (now - p["ts"]) / 86400 - 1) / CONTINUE_HALF_LIFE)]
+    cont = cont[:HOME_CONTINUE]
     used = set(cont)
 
     # 1. Queue, part one: the next unwatched video of saved playlists, a different few each day
@@ -777,9 +850,19 @@ def build_mix(c, area="", cat="", length="", types=None):
         return [dict(card(v, st), reason=reasons.get(v)) for v in vids]
     for v in cont:
         reasons.setdefault(v, {"kind": "continue", "text": "Continue watching"})
-    # One large pick, then a single grid: the user's own things first, then suggestions, then the far ones.
-    return {"lead": out(picks[:1]), "items": out(cont + queue + picks[1:] + branch),
-            "today": today_tally(c)}
+
+    # The large pick: most days the best suggestion, some days a new upload or a branch-out video instead.
+    new_ups = [v for v in uploads if st.is_new(v)]
+    r = rnd(seed, "lead")
+    lead = (new_ups[:1] if new_ups and r < 0.25 else branch[:1] if branch and r > 0.85 else []) or picks[:1] or branch[:1]
+    rest = [[v for v in xs if v not in lead] for xs in (cont, nexts, uploads, picks, branch)]
+
+    # Then a single grid, dealt like a riffle: each list keeps its own order, but they are interleaved by a
+    # draw per video, so the kinds mix differently each day. The user's own things lean towards the top.
+    def key(i, n, vid, own):
+        return (i + rnd(seed + "ord", vid)) / n * (0.6 if own else 1.0)
+    order = sorted(((key(i, len(xs), v, k < 3), v) for k, xs in enumerate(rest) for i, v in enumerate(xs)))
+    return {"lead": out(lead), "items": out([v for _, v in order]), "today": today_tally(c)}
 
 
 # ---------------------------------------------------------------- API
@@ -1116,6 +1199,8 @@ def set_progress(vid: str, payload: dict = Body(default={})):
     except (TypeError, ValueError):
         raise HTTPException(400, "pos, dur and played must be numbers")
     with db() as c:
+        if dur:  # an upload found without the API key has no length until it is played
+            c.execute("update extra set dur=? where vid=? and dur is null", (int(dur), vid))
         if dur and 30 < pos < dur * 0.9:
             c.execute("insert into progress(vid, pos, dur, ts) values(?,?,?,?) on conflict(vid) do update set "
                       "pos=excluded.pos, dur=excluded.dur, ts=excluded.ts", (vid, pos, dur, time.time()))
@@ -1611,8 +1696,11 @@ def history():
         st = snapshot(c)
     # newest first, 300 at most; rows from a Takeout file without readable dates carry tiny timestamps and no day
     rows = sorted(((v, t) for v, t in st.watched.items() if v in V or v in st.extra), key=lambda x: -x[1])[:300]
+    started = [v for v, _ in sorted(st.progress.items(), key=lambda x: -x[1]["ts"])
+               if v not in st.watched and v not in st.hidden and st.available(v)]
     return {"items": [dict(card(v, st), when=datetime.fromtimestamp(t).strftime("%Y-%m-%d") if t > 86400 * 365 else "")
                       for v, t in rows],
+            "started": [card(v, st) for v in started],
             "hidden": [card(v, st) for v in st.hidden if v in V or v in st.extra]}
 
 
@@ -1735,7 +1823,6 @@ def following():
 
 @app.post("/api/refresh_uploads")
 def api_refresh_uploads():
-    yt_key_check()
     return refresh_uploads()
 
 

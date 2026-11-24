@@ -989,7 +989,7 @@ async function pageFollowing(tab) {
   if (total <= 12) chanFilter = '';   // the filter box is not drawn then
   let h = `<div class="pagehead"><h2>Following</h2></div>
     <div class="tabs"><a href="#/following" class="${chans ? '' : 'on'}">Videos</a><a href="#/following/channels" class="${chans ? 'on' : ''}">Channels <span class="muted">${total}</span></a>
-      <span class="grow"></span>${chans || !B.has_key ? '' : `<button class="pill" data-act="refresh">${I.refresh} Check for new uploads</button>`}</div>`;
+      <span class="grow"></span>${chans ? '' : `<button class="pill" data-act="refresh">${I.refresh} Check for new uploads</button>`}</div>`;
   if (chans) {
     h += `<div class="forms">
       <form id="chanfind"><input class="field" type="text" name="q" placeholder="Find a channel in the library" aria-label="Find a channel"><button class="pill">Find</button></form>
@@ -1103,7 +1103,8 @@ async function pageLibrary(tab) {
       if (!groups.length || groups[groups.length - 1][0] !== label) groups.push([label, []]);
       groups[groups.length - 1][1].push(v);
     }
-    h += groups.map(([label, items]) => `<h3 class="sechead">${esc(label)}</h3>${grid(items)}`).join('') || '<p class="empty">Nothing watched yet.</p>';
+    if (d.started.length) h += `<h3 class="sechead">Not finished</h3>${grid(d.started)}`;
+    h += groups.map(([label, items]) => `<h3 class="sechead">${esc(label)}</h3>${grid(items)}`).join('') || (d.started.length ? '' : '<p class="empty">Nothing watched yet.</p>');
     if (d.hidden.length) h += `<h3 class="sechead">Hidden videos</h3><div class="rows">${d.hidden.map(v => `<div class="r plain" data-vid="${v.vid}">
       <div class="name">${esc(v.title)}</div><button class="pill" data-act="unhide">Bring back</button></div>`).join('')}</div>`;
   }
@@ -1195,7 +1196,7 @@ function pageSetup() {
     <h3 class="sechead">YouTube API key</h3>
     <p class="fine">${B.has_key
       ? `Connected.${B.has_meta < B.total * .99 ? ` ${n(B.has_meta)} of ${n(B.total)} library videos have lengths; <code>pixi run fetch-meta</code> fetches the rest.` : ''}`
-      : 'Not set. A free key adds video lengths, new uploads from channels you follow, playlists and channels by link, and YouTube results under searches. Everything else works without one.'}</p>
+      : 'Not set. A free key adds video lengths (also of new uploads from channels you follow), playlists and channels by link, and YouTube results under searches. Everything else works without one.'}</p>
     <details class="howto"><summary>How to get a key</summary>
     <ol class="steps">
       <li>Open <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">console.cloud.google.com</a> and sign in.</li>
